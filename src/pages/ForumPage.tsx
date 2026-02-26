@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare,
@@ -12,7 +12,9 @@ import {
   User,
   Clock,
   MessageCircle,
-  Trash2
+  Trash2,
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { db } from '../lib/db';
@@ -23,7 +25,8 @@ import {
   addComment,
   toggleLikePost,
   isFirebaseConfigured,
-  deletePost as firebaseDeletePost
+  deletePost as firebaseDeletePost,
+  subscribeToUserLikes
 } from '../lib/firebase';
 
 interface ForumPageProps {
@@ -33,14 +36,12 @@ interface ForumPageProps {
 interface Post {
   id: string;
   odId?: number;
-  odUserId?: number;
   userId: string;
   userName: string;
   userLevel: string;
   content: string;
   timestamp: number;
   likes: number;
-  likedBy?: string[];
 }
 
 interface Comment {
@@ -60,217 +61,278 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
   const [newComment, setNewComment] = useState('');
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isOnline, setIsOnline] = useState(false);
+  // isOnline is now replaced by connectionStatus
   const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   
-  const unsubscribeRef = useRef<(() => void) | null>(null);
-  const commentsUnsubscribeRef = useRef<(() => void) | null>(null);
-  const hasLoadedRef = useRef(false);
+  const unsubscribePostsRef = useRef<(() => void) | null>(null);
+  const unsubscribeCommentsRef = useRef<(() => void) | null>(null);
+  const unsubscribeLikesRef = useRef<(() => void) | null>(null);
 
   const isDark = theme === 'dark';
 
-  // Load posts - with timeout fallback
+  // Load posts
   useEffect(() => {
     if (!currentUser) {
       setLoading(false);
       return;
     }
 
-    // Prevent double loading
-    if (hasLoadedRef.current) return;
-    hasLoadedRef.current = true;
+    console.log('🔄 Initializing forum...');
+    setLoading(true);
+    setError(null);
+    setConnectionStatus('connecting');
 
-    const loadPosts = async () => {
-      setLoading(true);
+    // Cleanup previous subscriptions
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+
+    const firebaseConfigured = isFirebaseConfigured();
+    console.log('📡 Firebase configured:', firebaseConfigured);
+
+    if (firebaseConfigured) {
+      // Firebase is configured
       
-      // Set a timeout to stop loading after 5 seconds no matter what
+      // Set a timeout for slow connections
       const timeoutId = setTimeout(() => {
-        setLoading(false);
-      }, 5000);
+        if (loading) {
+          console.log('⏱️ Connection timeout - showing offline mode');
+          setConnectionStatus('offline');
+          setLoading(false);
+          loadFromIndexedDB();
+        }
+      }, 10000);
 
+      // Subscribe to posts from Firebase
       try {
-        if (isFirebaseConfigured()) {
-          setIsOnline(true);
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          clearTimeout(timeoutId);
+          console.log('📥 Received posts from Firebase:', firebasePosts.length);
           
-          // Clean up previous subscription
-          if (unsubscribeRef.current) {
-            unsubscribeRef.current();
-          }
-
-          unsubscribeRef.current = subscribeToPosts((firebasePosts) => {
-            clearTimeout(timeoutId);
-            
-            const formattedPosts: Post[] = firebasePosts.map(p => ({
-              id: String(p.id),
-              userId: String(p.userId || ''),
-              userName: p.userName || 'Anonymous',
-              userLevel: p.userLevel || 'Student',
-              content: p.content || '',
-              timestamp: p.createdAt || Date.now(),
-              likes: p.likes || 0,
-              likedBy: []
-            }));
-            
-            formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
-            setPosts(formattedPosts);
-            setLoading(false); // ALWAYS set loading to false
-          });
-        } else {
-          // Fallback to IndexedDB
-          setIsOnline(false);
-          const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
-          const formattedPosts: Post[] = localPosts.map(p => ({
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
             id: String(p.id),
-            odId: p.id,
-            userId: String(p.userId),
+            userId: String(p.userId || ''),
             userName: p.userName || 'Anonymous',
             userLevel: p.userLevel || 'Student',
-            content: p.content,
-            timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
-            likes: p.likes || 0,
-            likedBy: []
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
           }));
+          
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
           setPosts(formattedPosts);
-          
-          // Check liked posts from IndexedDB
-          const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
-          const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
-          const liked = new Set<string>(localLikes.map(l => String(l.postId)));
-          setLikedPosts(liked);
-          
-          clearTimeout(timeoutId);
           setLoading(false);
-        }
-      } catch (error) {
-        console.error('Error loading posts:', error);
-        clearTimeout(timeoutId);
-        setLoading(false);
-      }
-    };
+          setConnectionStatus('connected');
+        });
 
-    loadPosts();
+        // Subscribe to user likes
+        unsubscribeLikesRef.current = subscribeToUserLikes(String(currentUser.id), (likedIds) => {
+          console.log('❤️ User liked posts:', likedIds.size);
+          setLikedPosts(likedIds);
+        });
+
+      } catch (err) {
+        console.error('❌ Firebase subscription error:', err);
+        clearTimeout(timeoutId);
+        setError('Failed to connect to server');
+        setConnectionStatus('offline');
+        setLoading(false);
+        loadFromIndexedDB();
+      }
+
+      return () => {
+        clearTimeout(timeoutId);
+      };
+
+    } else {
+      // Offline mode - use IndexedDB
+      setConnectionStatus('offline');
+      loadFromIndexedDB();
+    }
 
     return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-        unsubscribeRef.current = null;
+      if (unsubscribePostsRef.current) {
+        unsubscribePostsRef.current();
+        unsubscribePostsRef.current = null;
       }
-      hasLoadedRef.current = false;
+      if (unsubscribeLikesRef.current) {
+        unsubscribeLikesRef.current();
+        unsubscribeLikesRef.current = null;
+      }
     };
-  }, [currentUser]);
+  }, [currentUser?.id]);
+
+  const loadFromIndexedDB = async () => {
+    try {
+      console.log('📂 Loading posts from IndexedDB...');
+      const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
+      
+      const formattedPosts: Post[] = localPosts.map(p => ({
+        id: String(p.id),
+        odId: p.id,
+        userId: String(p.userId),
+        userName: p.userName || 'Anonymous',
+        userLevel: p.userLevel || 'Student',
+        content: p.content,
+        timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
+        likes: p.likes || 0
+      }));
+      
+      setPosts(formattedPosts);
+      console.log('📂 Loaded', formattedPosts.length, 'posts from IndexedDB');
+
+      // Load liked posts from IndexedDB
+      if (currentUser) {
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
+        const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
+        setLikedPosts(new Set(localLikes.map(l => String(l.postId))));
+      }
+    } catch (err) {
+      console.error('❌ IndexedDB error:', err);
+      setError('Failed to load posts');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Load comments for selected post
   useEffect(() => {
     if (!selectedPost) return;
 
-    const loadComments = async () => {
-      try {
-        if (isFirebaseConfigured()) {
-          if (commentsUnsubscribeRef.current) {
-            commentsUnsubscribeRef.current();
-          }
+    console.log('💬 Loading comments for post:', selectedPost.id);
 
-          commentsUnsubscribeRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
-            const formattedComments: Comment[] = firebaseComments.map(c => ({
-              id: String(c.id),
-              postId: String(c.postId || selectedPost.id),
-              userId: String(c.userId || ''),
-              userName: c.userName || 'Anonymous',
-              content: c.content || '',
-              timestamp: c.createdAt || Date.now()
-            }));
-            
-            formattedComments.sort((a, b) => a.timestamp - b.timestamp);
-            
-            setComments(prev => ({
-              ...prev,
-              [selectedPost.id]: formattedComments
-            }));
-          });
-        } else {
-          const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
-          const localComments = await db.forumComments
-            .where('postId')
-            .equals(postIdNum)
-            .toArray();
-          
-          const formattedComments: Comment[] = localComments.map(c => ({
-            id: String(c.id),
-            postId: String(c.postId),
-            userId: String(c.userId),
-            userName: c.userName || 'User',
-            content: c.content,
-            timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
-          }));
-          
-          setComments(prev => ({
-            ...prev,
-            [selectedPost.id]: formattedComments
-          }));
-        }
-      } catch (error) {
-        console.error('Error loading comments:', error);
-      }
-    };
+    if (unsubscribeCommentsRef.current) {
+      unsubscribeCommentsRef.current();
+      unsubscribeCommentsRef.current = null;
+    }
 
-    loadComments();
+    if (isFirebaseConfigured()) {
+      unsubscribeCommentsRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
+        console.log('💬 Received comments:', firebaseComments.length);
+        
+        const formattedComments: Comment[] = firebaseComments.map(c => ({
+          id: String(c.id),
+          postId: String(c.postId || selectedPost.id),
+          userId: String(c.userId || ''),
+          userName: c.userName || 'Anonymous',
+          content: c.content || '',
+          timestamp: c.createdAt || Date.now()
+        }));
+        
+        formattedComments.sort((a, b) => a.timestamp - b.timestamp);
+        
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: formattedComments
+        }));
+      });
+    } else {
+      // Load from IndexedDB
+      loadCommentsFromIndexedDB(selectedPost);
+    }
 
     return () => {
-      if (commentsUnsubscribeRef.current) {
-        commentsUnsubscribeRef.current();
-        commentsUnsubscribeRef.current = null;
+      if (unsubscribeCommentsRef.current) {
+        unsubscribeCommentsRef.current();
+        unsubscribeCommentsRef.current = null;
       }
     };
-  }, [selectedPost]);
+  }, [selectedPost?.id]);
 
-  const handleCreatePost = async () => {
+  const loadCommentsFromIndexedDB = async (post: Post) => {
+    try {
+      const postIdNum = post.odId || parseInt(post.id) || 0;
+      const localComments = await db.forumComments
+        .where('postId')
+        .equals(postIdNum)
+        .toArray();
+      
+      const formattedComments: Comment[] = localComments.map(c => ({
+        id: String(c.id),
+        postId: String(c.postId),
+        userId: String(c.userId),
+        userName: c.userName || 'User',
+        content: c.content,
+        timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
+      }));
+      
+      setComments(prev => ({
+        ...prev,
+        [post.id]: formattedComments
+      }));
+    } catch (err) {
+      console.error('Error loading comments:', err);
+    }
+  };
+
+  const handleCreatePost = useCallback(async () => {
     if (!newPost.trim() || !currentUser || submitting) return;
 
     setSubmitting(true);
+    setError(null);
+    const postContent = newPost.trim();
+    
+    console.log('📝 Creating post...');
 
     try {
       if (isFirebaseConfigured()) {
-        await createPost(
+        // Create in Firebase - the subscription will update the UI
+        const postId = await createPost(
           String(currentUser.id),
           currentUser.fullName,
           currentUser.academicLevel,
-          newPost.trim()
+          postContent
         );
+        
+        console.log('✅ Post created in Firebase:', postId);
+        setNewPost('');
+        
       } else {
-        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
-        await db.forumPosts.add({
+        // Create in IndexedDB
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+          
+        const localPostId = await db.forumPosts.add({
           userId: userIdNum,
           userName: currentUser.fullName,
           userLevel: currentUser.academicLevel,
-          content: newPost.trim(),
+          content: postContent,
           timestamp: new Date(),
           likes: 0
         });
-        // Reload posts for offline mode
-        const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
-        const formattedPosts: Post[] = localPosts.map(p => ({
-          id: String(p.id),
-          odId: p.id,
-          userId: String(p.userId),
-          userName: p.userName || 'Anonymous',
-          userLevel: p.userLevel || 'Student',
-          content: p.content,
-          timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
-          likes: p.likes || 0,
-          likedBy: []
-        }));
-        setPosts(formattedPosts);
+        
+        console.log('✅ Post created in IndexedDB:', localPostId);
+        
+        // Add to local state immediately
+        const newPostObj: Post = {
+          id: String(localPostId),
+          odId: localPostId as number,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          userLevel: currentUser.academicLevel,
+          content: postContent,
+          timestamp: Date.now(),
+          likes: 0
+        };
+        setPosts(prev => [newPostObj, ...prev]);
+        setNewPost('');
       }
-      setNewPost('');
-    } catch (error) {
-      console.error('Error creating post:', error);
+    } catch (err) {
+      console.error('❌ Error creating post:', err);
+      setError('Failed to create post. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
-    
-    setSubmitting(false);
-  };
+  }, [newPost, currentUser, submitting]);
 
-  const handleLike = async (post: Post) => {
+  const handleLike = useCallback(async (post: Post) => {
     if (!currentUser) return;
 
     const userId = String(currentUser.id);
@@ -302,7 +364,9 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         await toggleLikePost(post.id, userId);
       } else {
         const postIdNum = post.odId || parseInt(post.id) || 0;
-        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
         
         if (isLiked) {
           await db.postLikes.where({ postId: postIdNum, userId: userIdNum }).delete();
@@ -312,58 +376,82 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
           await db.forumPosts.update(postIdNum, { likes: post.likes + 1 });
         }
       }
-    } catch (error) {
-      console.error('Error toggling like:', error);
+    } catch (err) {
+      console.error('Error toggling like:', err);
+      // Revert optimistic update
+      setLikedPosts(prev => {
+        const newSet = new Set(prev);
+        if (isLiked) {
+          newSet.add(post.id);
+        } else {
+          newSet.delete(post.id);
+        }
+        return newSet;
+      });
     }
-  };
+  }, [currentUser, likedPosts]);
 
-  const handleAddComment = async () => {
+  const handleAddComment = useCallback(async () => {
     if (!newComment.trim() || !selectedPost || !currentUser || submitting) return;
 
     setSubmitting(true);
+    setError(null);
+    const commentContent = newComment.trim();
+
+    console.log('💬 Adding comment...');
 
     try {
       if (isFirebaseConfigured()) {
-        await addComment(
+        // Create in Firebase - subscription will update UI
+        const commentId = await addComment(
           selectedPost.id,
           String(currentUser.id),
           currentUser.fullName,
-          newComment.trim()
+          commentContent
         );
-      } else {
-        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
-        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
         
-        await db.forumComments.add({
+        console.log('✅ Comment created in Firebase:', commentId);
+        setNewComment('');
+        
+      } else {
+        // Create in IndexedDB
+        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+        
+        const localCommentId = await db.forumComments.add({
           postId: postIdNum,
           userId: userIdNum,
           userName: currentUser.fullName,
-          content: newComment.trim(),
+          content: commentContent,
           timestamp: new Date()
         });
         
-        // Reload comments
-        const localComments = await db.forumComments.where('postId').equals(postIdNum).toArray();
-        const formattedComments: Comment[] = localComments.map(c => ({
-          id: String(c.id),
-          postId: String(c.postId),
-          userId: String(c.userId),
-          userName: c.userName || 'User',
-          content: c.content,
-          timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
-        }));
+        console.log('✅ Comment created in IndexedDB:', localCommentId);
+        
+        // Add to local state
+        const newCommentObj: Comment = {
+          id: String(localCommentId),
+          postId: selectedPost.id,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          content: commentContent,
+          timestamp: Date.now()
+        };
         setComments(prev => ({
           ...prev,
-          [selectedPost.id]: formattedComments
+          [selectedPost.id]: [...(prev[selectedPost.id] || []), newCommentObj]
         }));
+        setNewComment('');
       }
-      setNewComment('');
-    } catch (error) {
-      console.error('Error adding comment:', error);
+    } catch (err) {
+      console.error('❌ Error adding comment:', err);
+      setError('Failed to add comment. Please try again.');
+    } finally {
+      setSubmitting(false);
     }
-    
-    setSubmitting(false);
-  };
+  }, [newComment, selectedPost, currentUser, submitting]);
 
   const handleDeletePost = async (postId: string) => {
     if (!currentUser) return;
@@ -376,8 +464,8 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         await db.forumPosts.delete(postIdNum);
         setPosts(prev => prev.filter(p => p.id !== postId));
       }
-    } catch (error) {
-      console.error('Error deleting post:', error);
+    } catch (err) {
+      console.error('Error deleting post:', err);
     }
   };
 
@@ -391,9 +479,44 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         ...prev,
         [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== commentId) || []
       }));
-    } catch (error) {
-      console.error('Error deleting comment:', error);
+    } catch (err) {
+      console.error('Error deleting comment:', err);
     }
+  };
+
+  const handleRefresh = () => {
+    setLoading(true);
+    setError(null);
+    
+    // Reset and reload
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+    
+    // Trigger reload by updating a dependency
+    setPosts([]);
+    
+    setTimeout(() => {
+      if (isFirebaseConfigured()) {
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
+          }));
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+        });
+      } else {
+        loadFromIndexedDB();
+      }
+    }, 500);
   };
 
   const formatTime = (timestamp: number) => {
@@ -431,14 +554,14 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
             {selectedPost ? (
               <button
                 onClick={() => setSelectedPost(null)}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10' : 'bg-gray-200'}`}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
               >
                 <ArrowLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
               </button>
             ) : (
               <button
                 onClick={onOpenMenu}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10' : 'bg-gray-200'}`}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
               >
                 <Menu className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
               </button>
@@ -448,27 +571,49 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
                 {selectedPost ? 'Discussion' : 'Community'}
               </h1>
               <div className="flex items-center gap-1 text-xs">
-                {isOnline ? (
+                {connectionStatus === 'connecting' ? (
+                  <>
+                    <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
+                    <span className="text-yellow-400">Connecting...</span>
+                  </>
+                ) : connectionStatus === 'connected' ? (
                   <>
                     <Wifi className="w-3 h-3 text-green-400" />
-                    <span className="text-green-400">Live</span>
+                    <span className="text-green-400">Live • All users synced</span>
                   </>
                 ) : (
                   <>
                     <WifiOff className="w-3 h-3 text-yellow-400" />
-                    <span className="text-yellow-400">Offline</span>
+                    <span className="text-yellow-400">Offline Mode</span>
                   </>
                 )}
               </div>
             </div>
           </div>
+          
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+          >
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''} ${isDark ? 'text-white' : 'text-gray-900'}`} />
+          </button>
         </div>
       </div>
 
+      {/* Error Message */}
+      {error && (
+        <div className="mx-4 mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-400 text-sm">{error}</span>
+        </div>
+      )}
+
       {/* Loading State */}
       {loading && (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+        <div className="flex flex-col items-center justify-center py-20">
+          <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-4" />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Loading posts...</p>
         </div>
       )}
 
@@ -567,7 +712,7 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
           </div>
 
           {/* Add Comment Input - Fixed at bottom */}
-          <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-xl border-t p-4 pb-safe ${isDark ? 'bg-black/90 border-white/10' : 'bg-white/90 border-gray-200'}`}>
+          <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-xl border-t p-4 ${isDark ? 'bg-black/90 border-white/10' : 'bg-white/90 border-gray-200'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
             <div className="flex gap-3 max-w-lg mx-auto">
               <input
                 type="text"
@@ -600,6 +745,19 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
       {/* Posts List View */}
       {!loading && !selectedPost && (
         <div className="p-4 pb-32">
+          {/* Connection Info Banner */}
+          {connectionStatus === 'offline' && (
+            <div className={`mb-4 p-3 rounded-xl flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-yellow-50 border border-yellow-200'}`}>
+              <WifiOff className="w-5 h-5 text-yellow-500 flex-shrink-0" />
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${isDark ? 'text-yellow-400' : 'text-yellow-700'}`}>Offline Mode</p>
+                <p className={`text-xs ${isDark ? 'text-yellow-500/70' : 'text-yellow-600'}`}>
+                  Posts are saved locally. Add Firebase config to sync with all users.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Create Post */}
           <div className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}>
             <textarea
@@ -611,10 +769,13 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
                 isDark ? 'text-white placeholder-gray-500' : 'text-gray-900 placeholder-gray-400'
               }`}
             />
-            <div className="flex justify-end mt-3">
+            <div className="flex justify-between items-center mt-3">
+              <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                {newPost.length}/500
+              </span>
               <button
                 onClick={handleCreatePost}
-                disabled={!newPost.trim() || submitting}
+                disabled={!newPost.trim() || submitting || newPost.length > 500}
                 className="px-5 py-2.5 rounded-xl bg-blue-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
               >
                 {submitting ? (
@@ -636,7 +797,7 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -20 }}
-                  transition={{ delay: index * 0.05 }}
+                  transition={{ delay: index * 0.03 }}
                   className={`backdrop-blur-xl rounded-2xl p-4 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
                 >
                   <div className="flex items-start gap-3 mb-3">
@@ -706,3 +867,5 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
     </div>
   );
 }
+
+export default ForumPage;
