@@ -39,9 +39,26 @@ function App() {
   const [showRatingPopup, setShowRatingPopup] = useState(false);
   const [sessionStart] = useState(Date.now());
 
-  // Apply theme to body
+  // Apply theme to document - THIS IS CRITICAL
   useEffect(() => {
-    document.body.className = `theme-${theme}`;
+    const root = document.documentElement;
+    const body = document.body;
+    
+    if (theme === 'light') {
+      root.classList.remove('dark');
+      root.classList.add('light');
+      body.classList.remove('dark');
+      body.classList.add('light');
+      body.style.backgroundColor = '#F2F2F7';
+      body.style.color = '#1F2937';
+    } else {
+      root.classList.remove('light');
+      root.classList.add('dark');
+      body.classList.remove('light');
+      body.classList.add('dark');
+      body.style.backgroundColor = '#000000';
+      body.style.color = '#FFFFFF';
+    }
   }, [theme]);
 
   // Increment visit count on app load
@@ -49,7 +66,7 @@ function App() {
     incrementVisitCount();
   }, [incrementVisitCount]);
 
-  // Check if should show rating popup (1 minute spent or after maybe later + new visit or after first mock exam)
+  // Check if should show rating popup
   useEffect(() => {
     if (!currentUser || hasRated) return;
 
@@ -58,24 +75,23 @@ function App() {
       const lastVisit = new Date(maybeLaterTimestamp).toDateString();
       const today = new Date().toDateString();
       if (lastVisit !== today) {
-        // New day, show popup after 5 seconds
         const timer = setTimeout(() => {
           setShowRatingPopup(true);
         }, 5000);
         return () => clearTimeout(timer);
       }
-      return; // Don't show popup again on same day if maybe later was clicked
+      return;
     }
 
-    // Show popup after first mock exam (immediately after increment)
+    // Show popup after first mock exam
     if (mockExamsTaken === 1) {
       const timer = setTimeout(() => {
         setShowRatingPopup(true);
-      }, 2000); // Show 2 seconds after first mock exam
+      }, 2000);
       return () => clearTimeout(timer);
     }
 
-    // Show popup after 1 minute (60000ms) for first time users
+    // Show popup after 1 minute for first time users
     if (!maybeLaterClicked && mockExamsTaken === 0) {
       const timer = setTimeout(() => {
         setShowRatingPopup(true);
@@ -95,7 +111,6 @@ function App() {
     setHasRated(true);
     setShowRatingPopup(false);
     
-    // Save to IndexedDB
     try {
       await db.feedback.add({
         id: Date.now(),
@@ -127,20 +142,6 @@ function App() {
     return <AuthPage />;
   }
 
-  if (currentPage === 'admin') {
-    return (
-      <div className={`min-h-screen ${theme === 'dark' ? 'ambient-bg text-white' : 'bg-[#F2F2F7] text-gray-900'}`}>
-        <Sidebar
-          isOpen={sidebarOpen}
-          onClose={() => setSidebarOpen(false)}
-          currentPage={currentPage}
-          onNavigate={navigateTo}
-        />
-        <AdminPage onOpenMenu={openSidebar} />
-      </div>
-    );
-  }
-
   const renderPage = () => {
     const commonProps = { onOpenMenu: openSidebar };
     
@@ -165,6 +166,8 @@ function App() {
         return <ProfilePage {...commonProps} />;
       case 'novel':
         return <NovelPage {...commonProps} />;
+      case 'admin':
+        return <AdminPage {...commonProps} />;
       case 'about':
         return <AboutPage {...commonProps} />;
       default:
@@ -172,8 +175,12 @@ function App() {
     }
   };
 
+  // Dynamic classes based on theme
+  const bgClass = theme === 'dark' ? 'bg-black' : 'bg-[#F2F2F7]';
+  const textClass = theme === 'dark' ? 'text-white' : 'text-gray-900';
+
   return (
-    <div className={`min-h-screen ${theme === 'dark' ? 'ambient-bg text-white' : 'bg-[#F2F2F7] text-gray-900'}`}>
+    <div className={`min-h-screen ${bgClass} ${textClass}`}>
       {/* Sidebar */}
       <Sidebar
         isOpen={sidebarOpen}
