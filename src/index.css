@@ -86,30 +86,89 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-/* Dark Theme (default) */
-body.theme-dark {
-  background: #000000;
-  color: #ffffff;
+/* ===================================
+   DARK THEME (Default)
+   =================================== */
+body.dark,
+body.theme-dark,
+html.dark body {
+  background-color: #000000 !important;
+  color: #ffffff !important;
 }
 
-/* Light Theme */
-body.theme-light {
-  background: #F2F2F7;
-  color: #1C1C1E;
+/* ===================================
+   LIGHT THEME
+   =================================== */
+body.light,
+body.theme-light,
+html.light body {
+  background-color: #F2F2F7 !important;
+  color: #1C1C1E !important;
 }
 
-body.theme-light .glass {
-  background: rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(0, 0, 0, 0.1);
+/* Light theme specific overrides */
+.light .bg-black,
+.theme-light .bg-black {
+  background-color: #F2F2F7 !important;
 }
 
-body.theme-light .glass-strong {
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.15);
+.light .bg-gray-900,
+.theme-light .bg-gray-900 {
+  background-color: #FFFFFF !important;
 }
 
-body.theme-light .ambient-bg {
-  background: linear-gradient(180deg, #F2F2F7 0%, #FFFFFF 100%);
+.light .text-white,
+.theme-light .text-white {
+  color: #1C1C1E !important;
+}
+
+.light .text-gray-400,
+.theme-light .text-gray-400 {
+  color: #6B7280 !important;
+}
+
+.light .text-gray-500,
+.theme-light .text-gray-500 {
+  color: #9CA3AF !important;
+}
+
+.light .border-white\/10,
+.theme-light .border-white\/10 {
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.light .bg-white\/5,
+.theme-light .bg-white\/5 {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+}
+
+.light .bg-white\/10,
+.theme-light .bg-white\/10 {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+.light .hover\:bg-white\/10:hover,
+.theme-light .hover\:bg-white\/10:hover {
+  background-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+/* Light theme glass effect */
+.light .glass,
+.theme-light .glass {
+  background: rgba(255, 255, 255, 0.8) !important;
+  border-color: rgba(0, 0, 0, 0.1) !important;
+}
+
+.light .glass-strong,
+.theme-light .glass-strong {
+  background: rgba(255, 255, 255, 0.9) !important;
+  border-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* Light theme ambient background */
+.light .ambient-bg,
+.theme-light .ambient-bg {
+  background: linear-gradient(180deg, #F2F2F7 0%, #FFFFFF 100%) !important;
 }
 
 /* Scrollbar styling */
@@ -123,7 +182,7 @@ body.theme-light .ambient-bg {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(128, 128, 128, 0.3);
   border-radius: 2px;
 }
 
@@ -181,9 +240,19 @@ body.theme-light .ambient-bg {
   padding-bottom: max(80px, calc(80px + env(safe-area-inset-bottom)));
 }
 
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
 /* Input styling */
 input, textarea, select {
   font-family: 'Sora', sans-serif;
+}
+
+/* Focus states */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: #007AFF !important;
 }
 
 /* Animations */
@@ -203,4 +272,20 @@ input, textarea, select {
 
 .animate-float {
   animation: float 3s ease-in-out infinite;
+}
+
+/* Touch friendly buttons */
+button, a, [role="button"] {
+  touch-action: manipulation;
+}
+
+/* Mobile optimizations */
+@media (max-width: 640px) {
+  body {
+    -webkit-text-size-adjust: 100%;
+  }
+  
+  input, select, textarea {
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
 }
