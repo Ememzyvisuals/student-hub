@@ -1,591 +1,703 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  MessageSquare, 
-  Heart, 
-  Send, 
-  User,
-  Clock,
-  Plus,
-  X,
+import {
+  MessageSquare,
+  Heart,
+  Send,
   ArrowLeft,
   Menu,
   Wifi,
-  WifiOff
+  WifiOff,
+  Loader2,
+  User,
+  Clock,
+  MessageCircle,
+  Trash2
 } from 'lucide-react';
-import { GlassCard } from '@/components/ui/GlassCard';
-import { Button } from '@/components/ui/Button';
-import { Textarea } from '@/components/ui/Input';
-import { useStore } from '@/store/useStore';
-import { db as localDb } from '@/lib/db';
-import { 
-  isFirebaseConfigured,
+import { useStore } from '../store/useStore';
+import { db } from '../lib/db';
+import {
   subscribeToPosts,
   subscribeToComments,
-  subscribeToUserLikes,
-  createPost as firebaseCreatePost,
+  createPost,
+  addComment,
   toggleLikePost,
-  addComment as firebaseAddComment,
-  FirebasePost,
-  FirebaseComment
-} from '@/lib/firebase';
-import { toNumericId } from '@/lib/utils';
+  isFirebaseConfigured,
+  deletePost as firebaseDeletePost
+} from '../lib/firebase';
 
 interface ForumPageProps {
   onOpenMenu?: () => void;
 }
 
-// Unified post type
 interface Post {
   id: string;
+  odId?: number;
+  odUserId?: number;
   userId: string;
   userName: string;
   userLevel: string;
   content: string;
+  timestamp: number;
   likes: number;
-  timestamp: Date;
+  likedBy?: string[];
 }
 
-// Unified comment type
 interface Comment {
   id: string;
   postId: string;
   userId: string;
   userName: string;
   content: string;
-  timestamp: Date;
+  timestamp: number;
 }
 
 export function ForumPage({ onOpenMenu }: ForumPageProps) {
-  const { currentUser, theme } = useStore();
-  const isDark = theme === 'dark';
-  const useFirebase = isFirebaseConfigured();
-  
+  const { currentUser } = useStore();
   const [posts, setPosts] = useState<Post[]>([]);
-  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
-  const [comments, setComments] = useState<Comment[]>([]);
-  const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
-  
-  const [showCreate, setShowCreate] = useState(false);
-  const [newPostContent, setNewPostContent] = useState('');
+  const [comments, setComments] = useState<Record<string, Comment[]>>({});
+  const [newPost, setNewPost] = useState('');
   const [newComment, setNewComment] = useState('');
-  const [isLoading, setIsLoading] = useState(true);
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [isOnline, setIsOnline] = useState(isFirebaseConfigured());
+  const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
+  const [submitting, setSubmitting] = useState(false);
+  
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const commentsUnsubscribeRef = useRef<(() => void) | null>(null);
 
-  // Load posts - with real-time listener for Firebase
+  // Load posts - single subscription
   useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-
-    if (useFirebase) {
-      // Firebase: Real-time listener - all users see each other's posts
-      unsubscribe = subscribeToPosts((firebasePosts: FirebasePost[]) => {
-        const convertedPosts: Post[] = firebasePosts.map(p => ({
-          id: p.id,
-          userId: p.userId,
-          userName: p.userName,
-          userLevel: p.userLevel,
-          content: p.content,
-          likes: p.likes || 0,
-          timestamp: new Date(p.createdAt)
-        }));
-        setPosts(convertedPosts);
-        setIsLoading(false);
-      });
-    } else {
-      // IndexedDB: Local only (fallback)
-      const loadLocalPosts = async () => {
-        const allPosts = await localDb.forumPosts.orderBy('timestamp').reverse().toArray();
-        const convertedPosts: Post[] = allPosts.map(p => ({
-          id: String(p.id!),
-          userId: String(p.userId),
-          userName: p.userName,
-          userLevel: p.userLevel,
-          content: p.content,
-          likes: p.likes,
-          timestamp: p.timestamp
-        }));
-        setPosts(convertedPosts);
-        setIsLoading(false);
-      };
-      loadLocalPosts();
-    }
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, [useFirebase]);
-
-  // Load user's likes - with real-time listener for Firebase
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-
-    if (!currentUser) return;
-
-    if (useFirebase) {
-      // Firebase: Real-time listener for likes
-      unsubscribe = subscribeToUserLikes(currentUser.id, (likedPostIds) => {
-        setLikedPosts(likedPostIds);
-      });
-    } else {
-      // IndexedDB: Local only
-      const loadLocalLikes = async () => {
-        const userId = toNumericId(currentUser.id);
-        const likes = await localDb.postLikes.where('userId').equals(userId).toArray();
-        setLikedPosts(new Set(likes.map(l => String(l.postId))));
-      };
-      loadLocalLikes();
-    }
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, [currentUser?.id, useFirebase]);
-
-  // Load comments when a post is selected - with real-time listener for Firebase
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-
-    if (!selectedPost) {
-      setComments([]);
+    if (!currentUser) {
+      setLoading(false);
       return;
     }
 
-    if (useFirebase) {
-      // Firebase: Real-time listener for comments
-      unsubscribe = subscribeToComments(selectedPost.id, (firebaseComments: FirebaseComment[]) => {
-        const convertedComments: Comment[] = firebaseComments.map(c => ({
-          id: c.id,
-          postId: c.postId,
-          userId: c.userId,
-          userName: c.userName,
-          content: c.content,
-          timestamp: new Date(c.createdAt)
-        }));
-        setComments(convertedComments);
-      });
-    } else {
-      // IndexedDB: Local only
-      const loadLocalComments = async () => {
-        const postId = parseInt(selectedPost.id);
-        const postComments = await localDb.forumComments.where('postId').equals(postId).toArray();
-        const convertedComments: Comment[] = postComments.map(c => ({
-          id: String(c.id!),
-          postId: String(c.postId),
-          userId: String(c.userId),
-          userName: c.userName,
-          content: c.content,
-          timestamp: c.timestamp
-        }));
-        setComments(convertedComments);
-      };
-      loadLocalComments();
-    }
+    const loadPosts = async () => {
+      setLoading(true);
+
+      if (isFirebaseConfigured()) {
+        // Firebase real-time subscription
+        setIsOnline(true);
+        
+        // Clean up previous subscription
+        if (unsubscribeRef.current) {
+          unsubscribeRef.current();
+        }
+
+        unsubscribeRef.current = subscribeToPosts((firebasePosts) => {
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0,
+            likedBy: []
+          }));
+          
+          // Sort by timestamp (newest first)
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+        });
+      } else {
+        // Fallback to IndexedDB
+        setIsOnline(false);
+        try {
+          const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
+          const formattedPosts: Post[] = localPosts.map(p => ({
+            id: String(p.id),
+            odId: p.id,
+            userId: String(p.userId),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content,
+            timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
+            likes: p.likes || 0,
+            likedBy: []
+          }));
+          setPosts(formattedPosts);
+          
+          // Check liked posts from IndexedDB
+          const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
+          const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
+          const liked = new Set<string>(localLikes.map(l => String(l.postId)));
+          setLikedPosts(liked);
+        } catch (error) {
+          console.error('Error loading posts:', error);
+        }
+        setLoading(false);
+      }
+    };
+
+    loadPosts();
 
     return () => {
-      if (unsubscribe) unsubscribe();
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
     };
-  }, [selectedPost?.id, useFirebase]);
+  }, [currentUser]);
+
+  // Load comments for selected post
+  useEffect(() => {
+    if (!selectedPost) return;
+
+    const loadComments = async () => {
+      if (isFirebaseConfigured()) {
+        // Clean up previous subscription
+        if (commentsUnsubscribeRef.current) {
+          commentsUnsubscribeRef.current();
+        }
+
+        commentsUnsubscribeRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
+          const formattedComments: Comment[] = firebaseComments.map(c => ({
+            id: String(c.id),
+            postId: String(c.postId || selectedPost.id),
+            userId: String(c.userId || ''),
+            userName: c.userName || 'Anonymous',
+            content: c.content || '',
+            timestamp: c.createdAt || Date.now()
+          }));
+          
+          // Sort by timestamp (oldest first for comments)
+          formattedComments.sort((a, b) => a.timestamp - b.timestamp);
+          
+          setComments(prev => ({
+            ...prev,
+            [selectedPost.id]: formattedComments
+          }));
+        });
+      } else {
+        // Fallback to IndexedDB
+        try {
+          const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
+          const localComments = await db.forumComments
+            .where('postId')
+            .equals(postIdNum)
+            .toArray();
+          
+          const formattedComments: Comment[] = localComments.map(c => ({
+            id: String(c.id),
+            postId: String(c.postId),
+            userId: String(c.userId),
+            userName: c.userName || 'User',
+            content: c.content,
+            timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
+          }));
+          
+          setComments(prev => ({
+            ...prev,
+            [selectedPost.id]: formattedComments
+          }));
+        } catch (error) {
+          console.error('Error loading comments:', error);
+        }
+      }
+    };
+
+    loadComments();
+
+    return () => {
+      if (commentsUnsubscribeRef.current) {
+        commentsUnsubscribeRef.current();
+        commentsUnsubscribeRef.current = null;
+      }
+    };
+  }, [selectedPost]);
 
   const handleCreatePost = async () => {
-    if (!currentUser || !newPostContent.trim()) return;
+    if (!newPost.trim() || !currentUser || submitting) return;
+
+    setSubmitting(true);
 
     try {
-      if (useFirebase) {
-        // Firebase: Creates post that all users see in real-time
-        await firebaseCreatePost(
-          currentUser.id,
+      if (isFirebaseConfigured()) {
+        await createPost(
+          String(currentUser.id),
           currentUser.fullName,
           currentUser.academicLevel,
-          newPostContent.trim()
+          newPost.trim()
         );
       } else {
-        // IndexedDB: Local only
-        await localDb.forumPosts.add({
-          userId: toNumericId(currentUser.id),
+        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
+        await db.forumPosts.add({
+          userId: userIdNum,
           userName: currentUser.fullName,
           userLevel: currentUser.academicLevel,
-          content: newPostContent.trim(),
-          likes: 0,
-          timestamp: new Date()
+          content: newPost.trim(),
+          timestamp: new Date(),
+          likes: 0
         });
-        // Reload posts for local
-        const allPosts = await localDb.forumPosts.orderBy('timestamp').reverse().toArray();
-        setPosts(allPosts.map(p => ({
-          id: String(p.id!),
+        // Reload posts for offline mode
+        const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
+        const formattedPosts: Post[] = localPosts.map(p => ({
+          id: String(p.id),
+          odId: p.id,
           userId: String(p.userId),
-          userName: p.userName,
-          userLevel: p.userLevel,
+          userName: p.userName || 'Anonymous',
+          userLevel: p.userLevel || 'Student',
           content: p.content,
-          likes: p.likes,
-          timestamp: p.timestamp
-        })));
+          timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
+          likes: p.likes || 0,
+          likedBy: []
+        }));
+        setPosts(formattedPosts);
       }
-
-      setNewPostContent('');
-      setShowCreate(false);
+      setNewPost('');
     } catch (error) {
       console.error('Error creating post:', error);
     }
+    
+    setSubmitting(false);
   };
 
-  const handleLikePost = async (post: Post) => {
+  const handleLike = async (post: Post) => {
     if (!currentUser) return;
 
-    try {
-      if (useFirebase) {
-        // Firebase: Toggle like - updates in real-time for all users
-        await toggleLikePost(post.id, currentUser.id);
-        // Likes will be updated via real-time listener
-      } else {
-        // IndexedDB: Local only
-        const postId = parseInt(post.id);
-        const userId = toNumericId(currentUser.id);
-        const existingLike = await localDb.postLikes
-          .where('[postId+userId]')
-          .equals([postId, userId])
-          .first();
+    const userId = String(currentUser.id);
+    const isLiked = likedPosts.has(post.id);
 
-        if (existingLike) {
-          await localDb.postLikes.delete(existingLike.id!);
-          await localDb.forumPosts.update(postId, { likes: Math.max(0, post.likes - 1) });
-          setLikedPosts(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(post.id);
-            return newSet;
-          });
-        } else {
-          await localDb.postLikes.add({ postId, userId });
-          await localDb.forumPosts.update(postId, { likes: post.likes + 1 });
-          setLikedPosts(prev => new Set(prev).add(post.id));
-        }
+    // Optimistic update
+    setLikedPosts(prev => {
+      const newSet = new Set(prev);
+      if (isLiked) {
+        newSet.delete(post.id);
+      } else {
+        newSet.add(post.id);
+      }
+      return newSet;
+    });
+
+    setPosts(prev => prev.map(p => {
+      if (p.id === post.id) {
+        return {
+          ...p,
+          likes: isLiked ? Math.max(0, p.likes - 1) : p.likes + 1
+        };
+      }
+      return p;
+    }));
+
+    try {
+      if (isFirebaseConfigured()) {
+        await toggleLikePost(post.id, userId);
+      } else {
+        const postIdNum = post.odId || parseInt(post.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
         
-        // Reload posts
-        const allPosts = await localDb.forumPosts.orderBy('timestamp').reverse().toArray();
-        setPosts(allPosts.map(p => ({
-          id: String(p.id!),
-          userId: String(p.userId),
-          userName: p.userName,
-          userLevel: p.userLevel,
-          content: p.content,
-          likes: p.likes,
-          timestamp: p.timestamp
-        })));
+        if (isLiked) {
+          await db.postLikes.where({ postId: postIdNum, userId: userIdNum }).delete();
+          await db.forumPosts.update(postIdNum, { likes: Math.max(0, post.likes - 1) });
+        } else {
+          await db.postLikes.add({ postId: postIdNum, userId: userIdNum });
+          await db.forumPosts.update(postIdNum, { likes: post.likes + 1 });
+        }
       }
     } catch (error) {
-      console.error('Error liking post:', error);
+      console.error('Error toggling like:', error);
+      // Revert optimistic update on error
+      setLikedPosts(prev => {
+        const newSet = new Set(prev);
+        if (isLiked) {
+          newSet.add(post.id);
+        } else {
+          newSet.delete(post.id);
+        }
+        return newSet;
+      });
     }
   };
 
-  const handleViewPost = (post: Post) => {
-    setSelectedPost(post);
-  };
-
   const handleAddComment = async () => {
-    if (!currentUser || !selectedPost || !newComment.trim()) return;
+    if (!newComment.trim() || !selectedPost || !currentUser || submitting) return;
+
+    setSubmitting(true);
 
     try {
-      if (useFirebase) {
-        // Firebase: Add comment - visible to all users in real-time
-        await firebaseAddComment(
+      if (isFirebaseConfigured()) {
+        await addComment(
           selectedPost.id,
-          currentUser.id,
+          String(currentUser.id),
           currentUser.fullName,
           newComment.trim()
         );
       } else {
-        // IndexedDB: Local only
-        await localDb.forumComments.add({
-          postId: parseInt(selectedPost.id),
-          userId: toNumericId(currentUser.id),
+        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' ? currentUser.id : parseInt(String(currentUser.id)) || 0;
+        
+        await db.forumComments.add({
+          postId: postIdNum,
+          userId: userIdNum,
           userName: currentUser.fullName,
           content: newComment.trim(),
           timestamp: new Date()
         });
+        
         // Reload comments
-        const postComments = await localDb.forumComments.where('postId').equals(parseInt(selectedPost.id)).toArray();
-        setComments(postComments.map(c => ({
-          id: String(c.id!),
+        const localComments = await db.forumComments.where('postId').equals(postIdNum).toArray();
+        const formattedComments: Comment[] = localComments.map(c => ({
+          id: String(c.id),
           postId: String(c.postId),
           userId: String(c.userId),
-          userName: c.userName,
+          userName: c.userName || 'User',
           content: c.content,
-          timestamp: c.timestamp
-        })));
+          timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
+        }));
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: formattedComments
+        }));
       }
-
       setNewComment('');
     } catch (error) {
       console.error('Error adding comment:', error);
     }
+    
+    setSubmitting(false);
   };
 
-  const formatTime = (date: Date) => {
-    const now = new Date();
-    const diff = now.getTime() - new Date(date).getTime();
-    const mins = Math.floor(diff / 60000);
+  const handleDeletePost = async (postId: string) => {
+    if (!currentUser) return;
+    
+    try {
+      if (isFirebaseConfigured()) {
+        await firebaseDeletePost(postId);
+      } else {
+        const postIdNum = parseInt(postId) || 0;
+        await db.forumPosts.delete(postIdNum);
+        setPosts(prev => prev.filter(p => p.id !== postId));
+      }
+    } catch (error) {
+      console.error('Error deleting post:', error);
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!selectedPost) return;
+    
+    try {
+      if (isFirebaseConfigured()) {
+        // For Firebase, we need to implement deleteComment
+        // For now, we'll skip Firebase comment deletion
+      } else {
+        const commentIdNum = parseInt(commentId) || 0;
+        await db.forumComments.delete(commentIdNum);
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== commentId) || []
+        }));
+      }
+    } catch (error) {
+      console.error('Error deleting comment:', error);
+    }
+  };
+
+  const formatTime = (timestamp: number) => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     const days = Math.floor(diff / 86400000);
 
-    if (mins < 1) return 'Just now';
-    if (mins < 60) return `${mins}m ago`;
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
     if (hours < 24) return `${hours}h ago`;
     return `${days}d ago`;
   };
 
+  const isAdmin = currentUser?.email === 'ememzyvisuals@gmail.com';
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center p-4">
+        <div className="text-center">
+          <MessageSquare className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+          <p className="text-gray-400">Please login to access the forum</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`min-h-screen pb-24 ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
-      {/* Header with Menu */}
-      <div className={`sticky top-0 z-30 px-4 py-3 ${isDark ? 'bg-black/90' : 'bg-white/90'} backdrop-blur-xl border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
-        <div className="flex items-center justify-between max-w-2xl mx-auto">
+    <div className="min-h-screen bg-black">
+      {/* Header */}
+      <div className="sticky top-0 z-40 bg-black/80 backdrop-blur-xl border-b border-white/10">
+        <div className="flex items-center justify-between p-4">
           <div className="flex items-center gap-3">
             {selectedPost ? (
-              <button 
-                onClick={() => setSelectedPost(null)} 
-                className={`p-2 rounded-xl transition-colors ${isDark ? 'hover:bg-white/10 text-white' : 'hover:bg-gray-100 text-gray-900'}`}
+              <button
+                onClick={() => setSelectedPost(null)}
+                className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center"
               >
-                <ArrowLeft size={22} strokeWidth={1.5} />
+                <ArrowLeft className="w-5 h-5 text-white" />
               </button>
             ) : (
-              <button 
-                onClick={onOpenMenu} 
-                className={`p-2 rounded-xl transition-colors ${isDark ? 'hover:bg-white/10 text-white' : 'hover:bg-gray-100 text-gray-700'}`}
+              <button
+                onClick={onOpenMenu}
+                className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center"
               >
-                <Menu size={22} strokeWidth={1.5} />
+                <Menu className="w-5 h-5 text-white" />
               </button>
             )}
-            <h1 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
-              {selectedPost ? 'Discussion' : 'Community'}
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
-            {/* Firebase status indicator */}
-            <div className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${
-              useFirebase 
-                ? 'bg-green-500/20 text-green-400' 
-                : 'bg-yellow-500/20 text-yellow-400'
-            }`}>
-              {useFirebase ? <Wifi size={12} /> : <WifiOff size={12} />}
-              <span>{useFirebase ? 'Live' : 'Local'}</span>
+            <div>
+              <h1 className="text-xl font-bold text-white" style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                {selectedPost ? 'Discussion' : 'Community'}
+              </h1>
+              <div className="flex items-center gap-1 text-xs">
+                {isOnline ? (
+                  <>
+                    <Wifi className="w-3 h-3 text-green-400" />
+                    <span className="text-green-400">Live</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-3 h-3 text-yellow-400" />
+                    <span className="text-yellow-400">Offline</span>
+                  </>
+                )}
+              </div>
             </div>
-            {!selectedPost && (
-              <motion.button
-                whileTap={{ scale: 0.9 }}
-                onClick={() => setShowCreate(true)}
-                className="p-2.5 rounded-xl bg-primary/20 text-primary"
-              >
-                <Plus size={22} strokeWidth={1.5} />
-              </motion.button>
-            )}
           </div>
         </div>
       </div>
 
-      <div className="px-4 py-4 max-w-2xl mx-auto">
-        <AnimatePresence mode="wait">
-          {/* Posts List */}
-          {!selectedPost && (
-            <motion.div
-              key="posts"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="space-y-4"
-            >
-              {isLoading ? (
-                <div className="text-center py-12">
-                  <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                  <p className={isDark ? 'text-white/60' : 'text-gray-500'}>Loading discussions...</p>
-                </div>
-              ) : posts.length === 0 ? (
-                <GlassCard className="text-center py-12" hover={false}>
-                  <MessageSquare className={`w-12 h-12 mx-auto mb-4 ${isDark ? 'text-white/20' : 'text-gray-300'}`} strokeWidth={1.5} />
-                  <p className={`mb-4 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>No discussions yet</p>
-                  <Button onClick={() => setShowCreate(true)} icon={<Plus size={18} strokeWidth={1.5} />}>
-                    Start a Discussion
-                  </Button>
-                </GlassCard>
-              ) : (
-                posts.map((post, idx) => (
-                  <motion.div
-                    key={post.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: idx * 0.05 }}
-                  >
-                    <GlassCard onClick={() => handleViewPost(post)}>
-                      <div className="flex items-start gap-3">
-                        <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center flex-shrink-0">
-                          <User size={18} className="text-white" strokeWidth={1.5} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{post.userName}</span>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-primary/20 text-primary font-medium">
-                              {post.userLevel}
-                            </span>
-                          </div>
-                          <p className={`text-sm line-clamp-3 mb-3 ${isDark ? 'text-white/80' : 'text-gray-600'}`}>
-                            {post.content}
-                          </p>
-                          <div className="flex items-center gap-4 text-sm">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleLikePost(post); }}
-                              className={`flex items-center gap-1.5 transition-colors ${
-                                likedPosts.has(post.id) ? 'text-red-500' : isDark ? 'text-white/50' : 'text-gray-400'
-                              }`}
-                            >
-                              <Heart size={16} fill={likedPosts.has(post.id) ? 'currentColor' : 'none'} strokeWidth={1.5} />
-                              <span>{post.likes}</span>
-                            </button>
-                            <div className={`flex items-center gap-1.5 ${isDark ? 'text-white/50' : 'text-gray-400'}`}>
-                              <Clock size={14} strokeWidth={1.5} />
-                              <span>{formatTime(post.timestamp)}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </GlassCard>
-                  </motion.div>
-                ))
-              )}
-            </motion.div>
-          )}
+      {/* Loading State */}
+      {loading && (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+        </div>
+      )}
 
-          {/* Post Detail */}
-          {selectedPost && (
-            <motion.div
-              key="detail"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="space-y-4"
-            >
-              {/* Original Post */}
-              <GlassCard hover={false}>
-                <div className="flex items-start gap-3">
-                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center flex-shrink-0">
-                    <User size={20} className="text-white" strokeWidth={1.5} />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedPost.userName}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-primary/20 text-primary font-medium">
-                        {selectedPost.userLevel}
-                      </span>
-                    </div>
-                    <p className={`text-xs mb-3 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                      {formatTime(selectedPost.timestamp)}
-                    </p>
-                    <p className={`leading-relaxed ${isDark ? 'text-white' : 'text-gray-900'}`}>
-                      {selectedPost.content}
-                    </p>
-                    <div className={`flex items-center gap-4 mt-4 pt-4 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
-                      <button
-                        onClick={() => handleLikePost(selectedPost)}
-                        className={`flex items-center gap-2 ${
-                          likedPosts.has(selectedPost.id) ? 'text-red-500' : isDark ? 'text-white/50' : 'text-gray-400'
-                        }`}
-                      >
-                        <Heart size={18} fill={likedPosts.has(selectedPost.id) ? 'currentColor' : 'none'} strokeWidth={1.5} />
-                        <span>{selectedPost.likes} likes</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </GlassCard>
-
-              {/* Comments */}
-              <div>
-                <h3 className={`text-sm font-medium mb-3 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
-                  Comments ({comments.length})
-                </h3>
-                <div className="space-y-3">
-                  {comments.map(comment => (
-                    <GlassCard key={comment.id} hover={false} className="py-3">
-                      <div className="flex items-start gap-3">
-                        <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${isDark ? 'bg-white/10' : 'bg-gray-100'}`}>
-                          <User size={16} className={isDark ? 'text-white/60' : 'text-gray-400'} strokeWidth={1.5} />
-                        </div>
-                        <div>
-                          <p className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>{comment.userName}</p>
-                          <p className={`text-sm mt-1 ${isDark ? 'text-white/70' : 'text-gray-600'}`}>{comment.content}</p>
-                          <p className={`text-xs mt-1 ${isDark ? 'text-white/40' : 'text-gray-400'}`}>{formatTime(comment.timestamp)}</p>
-                        </div>
-                      </div>
-                    </GlassCard>
-                  ))}
-                </div>
-              </div>
-
-              {/* Add Comment */}
-              <div className={`sticky bottom-0 -mx-4 px-4 py-4 border-t ${isDark ? 'bg-black/95 border-white/10' : 'bg-white/95 border-gray-200'} backdrop-blur-xl`}>
-                <div className="flex gap-3">
-                  <input
-                    type="text"
-                    value={newComment}
-                    onChange={e => setNewComment(e.target.value)}
-                    placeholder="Write a comment..."
-                    className={`flex-1 px-4 py-3 rounded-xl border focus:outline-none focus:ring-2 focus:ring-primary/50 ${
-                      isDark 
-                        ? 'bg-white/5 border-white/10 text-white placeholder:text-white/30' 
-                        : 'bg-white border-gray-200 text-gray-900 placeholder:text-gray-400'
-                    }`}
-                  />
-                  <motion.button
-                    whileTap={{ scale: 0.9 }}
-                    onClick={handleAddComment}
-                    disabled={!newComment.trim()}
-                    className="p-3 rounded-xl bg-primary text-white disabled:opacity-50"
-                  >
-                    <Send size={20} strokeWidth={1.5} />
-                  </motion.button>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* Create Post Modal */}
-      <AnimatePresence>
-        {showCreate && (
+      {/* Post Detail View */}
+      {!loading && selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Selected Post */}
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm p-4"
-            onClick={() => setShowCreate(false)}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/5 backdrop-blur-xl rounded-2xl p-4 border border-white/10 mb-6"
           >
-            <motion.div
-              initial={{ y: 100 }}
-              animate={{ y: 0 }}
-              exit={{ y: 100 }}
-              onClick={e => e.stopPropagation()}
-              className={`w-full max-w-md rounded-2xl p-6 border ${isDark ? 'bg-gray-900 border-white/10' : 'bg-white border-gray-200'}`}
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  New Discussion
-                </h2>
-                <button onClick={() => setShowCreate(false)} className={isDark ? 'text-white/60' : 'text-gray-400'}>
-                  <X size={24} strokeWidth={1.5} />
-                </button>
+            <div className="flex items-start gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                <User className="w-5 h-5 text-white" />
               </div>
-
-              <div className="space-y-4">
-                <Textarea
-                  placeholder="Share your question or thoughts with the community..."
-                  value={newPostContent}
-                  onChange={e => setNewPostContent(e.target.value)}
-                  rows={5}
-                />
-                <Button onClick={handleCreatePost} fullWidth disabled={!newPostContent.trim()}>
-                  Post Discussion
-                </Button>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-white">{selectedPost.userName}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
+                    {selectedPost.userLevel}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 text-gray-500 text-xs mt-0.5">
+                  <Clock className="w-3 h-3" />
+                  <span>{formatTime(selectedPost.timestamp)}</span>
+                </div>
               </div>
-            </motion.div>
+            </div>
+            <p className="text-gray-200 text-base leading-relaxed">{selectedPost.content}</p>
+            <div className="flex items-center gap-4 mt-4 pt-3 border-t border-white/10">
+              <button
+                onClick={() => handleLike(selectedPost)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                  likedPosts.has(selectedPost.id)
+                    ? 'bg-red-500/20 text-red-400'
+                    : 'text-gray-400 hover:bg-white/5'
+                }`}
+              >
+                <Heart className={`w-4 h-4 ${likedPosts.has(selectedPost.id) ? 'fill-current' : ''}`} />
+                <span className="text-sm">{selectedPost.likes}</span>
+              </button>
+              <div className="flex items-center gap-2 text-gray-400">
+                <MessageCircle className="w-4 h-4" />
+                <span className="text-sm">{comments[selectedPost.id]?.length || 0}</span>
+              </div>
+            </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+
+          {/* Comments */}
+          <div className="mb-6">
+            <h3 className="text-lg font-semibold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
+              Comments ({comments[selectedPost.id]?.length || 0})
+            </h3>
+            
+            <div className="space-y-3">
+              <AnimatePresence>
+                {comments[selectedPost.id]?.map((comment, index) => (
+                  <motion.div
+                    key={comment.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    transition={{ delay: index * 0.05 }}
+                    className="bg-white/5 rounded-xl p-3 border border-white/5"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-green-500 to-teal-600 flex items-center justify-center">
+                          <User className="w-3.5 h-3.5 text-white" />
+                        </div>
+                        <span className="font-medium text-white text-sm">{comment.userName}</span>
+                        <span className="text-gray-500 text-xs">{formatTime(comment.timestamp)}</span>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteComment(comment.id)}
+                          className="p-1.5 rounded-lg hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-gray-300 text-sm pl-9">{comment.content}</p>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              
+              {(!comments[selectedPost.id] || comments[selectedPost.id].length === 0) && (
+                <div className="text-center py-8">
+                  <MessageCircle className="w-12 h-12 text-gray-600 mx-auto mb-3" />
+                  <p className="text-gray-500">No comments yet. Be the first!</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Add Comment Input - Fixed at bottom */}
+          <div className="fixed bottom-0 left-0 right-0 bg-black/90 backdrop-blur-xl border-t border-white/10 p-4 pb-safe">
+            <div className="flex gap-3 max-w-lg mx-auto">
+              <input
+                type="text"
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleAddComment()}
+                placeholder="Write a comment..."
+                className="flex-1 bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 text-base"
+              />
+              <button
+                onClick={handleAddComment}
+                disabled={!newComment.trim() || submitting}
+                className="w-12 h-12 rounded-xl bg-blue-500 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {submitting ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5 text-white" />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Posts List View */}
+      {!loading && !selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Create Post */}
+          <div className="bg-white/5 backdrop-blur-xl rounded-2xl p-4 border border-white/10 mb-6">
+            <textarea
+              value={newPost}
+              onChange={(e) => setNewPost(e.target.value)}
+              placeholder="Share something with the community..."
+              rows={3}
+              className="w-full bg-transparent text-white placeholder-gray-500 resize-none focus:outline-none text-base"
+            />
+            <div className="flex justify-end mt-3">
+              <button
+                onClick={handleCreatePost}
+                disabled={!newPost.trim() || submitting}
+                className="px-5 py-2.5 rounded-xl bg-blue-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {submitting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Post
+              </button>
+            </div>
+          </div>
+
+          {/* Posts */}
+          <div className="space-y-4">
+            <AnimatePresence>
+              {posts.map((post, index) => (
+                <motion.div
+                  key={post.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  transition={{ delay: index * 0.05 }}
+                  className="bg-white/5 backdrop-blur-xl rounded-2xl p-4 border border-white/10"
+                >
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                      <User className="w-5 h-5 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-white">{post.userName}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
+                          {post.userLevel}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 text-gray-500 text-xs mt-0.5">
+                        <Clock className="w-3 h-3" />
+                        <span>{formatTime(post.timestamp)}</span>
+                      </div>
+                    </div>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleDeletePost(post.id)}
+                        className="p-2 rounded-lg hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  
+                  <p className="text-gray-200 text-base leading-relaxed mb-4">{post.content}</p>
+                  
+                  <div className="flex items-center gap-4 pt-3 border-t border-white/10">
+                    <button
+                      onClick={() => handleLike(post)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                        likedPosts.has(post.id)
+                          ? 'bg-red-500/20 text-red-400'
+                          : 'text-gray-400 hover:bg-white/5'
+                      }`}
+                    >
+                      <Heart className={`w-4 h-4 ${likedPosts.has(post.id) ? 'fill-current' : ''}`} />
+                      <span className="text-sm">{post.likes}</span>
+                    </button>
+                    <button
+                      onClick={() => setSelectedPost(post)}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-gray-400 hover:bg-white/5 transition-colors"
+                    >
+                      <MessageCircle className="w-4 h-4" />
+                      <span className="text-sm">Comment</span>
+                    </button>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+
+            {posts.length === 0 && (
+              <div className="text-center py-12">
+                <MessageSquare className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                <h3 className="text-xl font-semibold text-white mb-2" style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  No posts yet
+                </h3>
+                <p className="text-gray-400">Be the first to start a discussion!</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
