@@ -1,320 +1,871 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Mail, Lock, GraduationCap, Eye, EyeOff, BookOpen, Wifi, WifiOff } from 'lucide-react';
-import { Input, Select } from '@/components/ui/Input';
-import { Button } from '@/components/ui/Button';
-import { GlassCard } from '@/components/ui/GlassCard';
-import { db } from '@/lib/db';
-import { useStore } from '@/store/useStore';
-import { 
-  isFirebaseConfigured, 
-  firebaseSignUp, 
-  firebaseSignIn, 
-  getUserData,
-  setUserOnline
-} from '@/lib/firebase';
+import {
+  MessageSquare,
+  Heart,
+  Send,
+  ArrowLeft,
+  Menu,
+  Wifi,
+  WifiOff,
+  Loader2,
+  User,
+  Clock,
+  MessageCircle,
+  Trash2,
+  AlertCircle,
+  RefreshCw
+} from 'lucide-react';
+import { useStore } from '../store/useStore';
+import { db } from '../lib/db';
+import {
+  subscribeToPosts,
+  subscribeToComments,
+  createPost,
+  addComment,
+  toggleLikePost,
+  isFirebaseConfigured,
+  deletePost as firebaseDeletePost,
+  subscribeToUserLikes
+} from '../lib/firebase';
 
-export function AuthPage() {
-  const [isLogin, setIsLogin] = useState(true);
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const useFirebase = isFirebaseConfigured();
+interface ForumPageProps {
+  onOpenMenu?: () => void;
+}
+
+interface Post {
+  id: string;
+  odId?: number;
+  userId: string;
+  userName: string;
+  userLevel: string;
+  content: string;
+  timestamp: number;
+  likes: number;
+}
+
+interface Comment {
+  id: string;
+  postId: string;
+  userId: string;
+  userName: string;
+  content: string;
+  timestamp: number;
+}
+
+export function ForumPage({ onOpenMenu }: ForumPageProps) {
+  const { currentUser, theme } = useStore();
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [comments, setComments] = useState<Record<string, Comment[]>>({});
+  const [newPost, setNewPost] = useState('');
+  const [newComment, setNewComment] = useState('');
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [loading, setLoading] = useState(true);
+  // isOnline is now replaced by connectionStatus
+  const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   
-  const [formData, setFormData] = useState({
-    fullName: '',
-    email: '',
-    password: '',
-    academicLevel: 'JAMB' as 'JSS' | 'SSS' | 'JAMB' | 'University'
-  });
+  const unsubscribePostsRef = useRef<(() => void) | null>(null);
+  const unsubscribeCommentsRef = useRef<(() => void) | null>(null);
+  const unsubscribeLikesRef = useRef<(() => void) | null>(null);
 
-  const setCurrentUser = useStore(state => state.setCurrentUser);
+  const isDark = theme === 'dark';
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    try {
-      if (useFirebase) {
-        // Firebase Authentication
-        if (isLogin) {
-          // Firebase Login
-          const authUser = await firebaseSignIn(formData.email, formData.password);
-          const userData = await getUserData(authUser.uid);
-          
-          if (userData) {
-            await setUserOnline(authUser.uid);
-            setCurrentUser({
-              id: authUser.uid,
-              email: userData.email,
-              fullName: userData.name,
-              academicLevel: userData.level,
-              streak: userData.streak,
-              questionsAnswered: userData.questionsAnswered,
-              correctAnswers: userData.correctAnswers
-            });
-          } else {
-            setError('User data not found');
-          }
-        } else {
-          // Firebase Signup
-          const userData = await firebaseSignUp(
-            formData.email,
-            formData.password,
-            formData.fullName,
-            formData.academicLevel
-          );
-          
-          await setUserOnline(userData.id);
-          setCurrentUser({
-            id: userData.id,
-            email: userData.email,
-            fullName: userData.name,
-            academicLevel: userData.level,
-            streak: userData.streak,
-            questionsAnswered: userData.questionsAnswered,
-            correctAnswers: userData.correctAnswers
-          });
-        }
-      } else {
-        // IndexedDB Fallback (offline mode)
-        if (isLogin) {
-          // Local Login
-          const user = await db.users.where('email').equals(formData.email.toLowerCase()).first();
-          
-          if (!user || user.password !== formData.password) {
-            setError('Invalid email or password');
-            setLoading(false);
-            return;
-          }
-
-          setCurrentUser({
-            id: String(user.id!),
-            email: user.email,
-            fullName: user.fullName,
-            academicLevel: user.academicLevel,
-            streak: user.streak,
-            questionsAnswered: user.totalQuestionsAnswered,
-            correctAnswers: user.totalCorrect
-          });
-        } else {
-          // Local Signup
-          const existingUser = await db.users.where('email').equals(formData.email.toLowerCase()).first();
-          
-          if (existingUser) {
-            setError('Email already registered');
-            setLoading(false);
-            return;
-          }
-
-          const today = new Date().toISOString().split('T')[0];
-          
-          const id = await db.users.add({
-            email: formData.email.toLowerCase(),
-            password: formData.password,
-            fullName: formData.fullName,
-            academicLevel: formData.academicLevel,
-            createdAt: new Date(),
-            streak: 1,
-            lastActiveDate: today,
-            totalQuestionsAnswered: 0,
-            totalCorrect: 0
-          });
-
-          setCurrentUser({
-            id: String(id),
-            email: formData.email.toLowerCase(),
-            fullName: formData.fullName,
-            academicLevel: formData.academicLevel,
-            streak: 1,
-            questionsAnswered: 0,
-            correctAnswers: 0
-          });
-        }
-      }
-    } catch (err: any) {
-      console.error('Auth error:', err);
-      // Handle Firebase-specific errors
-      if (err.code === 'auth/email-already-in-use') {
-        setError('Email already registered');
-      } else if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
-        setError('Invalid email or password');
-      } else if (err.code === 'auth/weak-password') {
-        setError('Password should be at least 6 characters');
-      } else if (err.code === 'auth/invalid-email') {
-        setError('Invalid email address');
-      } else {
-        setError(err.message || 'An error occurred. Please try again.');
-      }
+  // Load posts
+  useEffect(() => {
+    if (!currentUser) {
+      setLoading(false);
+      return;
     }
 
-    setLoading(false);
+    console.log('🔄 Initializing forum...');
+    setLoading(true);
+    setError(null);
+    setConnectionStatus('connecting');
+
+    // Cleanup previous subscriptions
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+
+    const firebaseConfigured = isFirebaseConfigured();
+    console.log('📡 Firebase configured:', firebaseConfigured);
+
+    if (firebaseConfigured) {
+      // Firebase is configured
+      
+      // Set a timeout for slow connections
+      const timeoutId = setTimeout(() => {
+        if (loading) {
+          console.log('⏱️ Connection timeout - showing offline mode');
+          setConnectionStatus('offline');
+          setLoading(false);
+          loadFromIndexedDB();
+        }
+      }, 10000);
+
+      // Subscribe to posts from Firebase
+      try {
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          clearTimeout(timeoutId);
+          console.log('📥 Received posts from Firebase:', firebasePosts.length);
+          
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
+          }));
+          
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+          setConnectionStatus('connected');
+        });
+
+        // Subscribe to user likes
+        unsubscribeLikesRef.current = subscribeToUserLikes(String(currentUser.id), (likedIds) => {
+          console.log('❤️ User liked posts:', likedIds.size);
+          setLikedPosts(likedIds);
+        });
+
+      } catch (err) {
+        console.error('❌ Firebase subscription error:', err);
+        clearTimeout(timeoutId);
+        setError('Failed to connect to server');
+        setConnectionStatus('offline');
+        setLoading(false);
+        loadFromIndexedDB();
+      }
+
+      return () => {
+        clearTimeout(timeoutId);
+      };
+
+    } else {
+      // Offline mode - use IndexedDB
+      setConnectionStatus('offline');
+      loadFromIndexedDB();
+    }
+
+    return () => {
+      if (unsubscribePostsRef.current) {
+        unsubscribePostsRef.current();
+        unsubscribePostsRef.current = null;
+      }
+      if (unsubscribeLikesRef.current) {
+        unsubscribeLikesRef.current();
+        unsubscribeLikesRef.current = null;
+      }
+    };
+  }, [currentUser?.id]);
+
+  const loadFromIndexedDB = async () => {
+    try {
+      console.log('📂 Loading posts from IndexedDB...');
+      const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
+      
+      const formattedPosts: Post[] = localPosts.map(p => ({
+        id: String(p.id),
+        odId: p.id,
+        userId: String(p.userId),
+        userName: p.userName || 'Anonymous',
+        userLevel: p.userLevel || 'Student',
+        content: p.content,
+        timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
+        likes: p.likes || 0
+      }));
+      
+      setPosts(formattedPosts);
+      console.log('📂 Loaded', formattedPosts.length, 'posts from IndexedDB');
+
+      // Load liked posts from IndexedDB
+      if (currentUser) {
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
+        const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
+        setLikedPosts(new Set(localLikes.map(l => String(l.postId))));
+      }
+    } catch (err) {
+      console.error('❌ IndexedDB error:', err);
+      setError('Failed to load posts');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  return (
-    <div className="min-h-screen flex flex-col justify-center px-4 py-8 ambient-bg">
-      {/* Logo & Branding */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="text-center mb-8"
-      >
-        <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-primary to-accent mb-4 shadow-[0_0_40px_rgba(0,122,255,0.4)]">
-          <BookOpen className="w-10 h-10 text-white" />
-        </div>
-        <h1 
-          className="text-3xl font-black text-white mb-1"
-          style={{ fontFamily: 'Clash Display, sans-serif' }}
-        >
-          STUDENTHUB NG
-        </h1>
-        <p className="text-white/60 text-sm">The best free study platform in Nigeria</p>
-        
-        {/* Connection status */}
-        <div className={`inline-flex items-center gap-2 mt-3 px-3 py-1.5 rounded-full text-xs ${
-          useFirebase 
-            ? 'bg-green-500/20 text-green-400' 
-            : 'bg-yellow-500/20 text-yellow-400'
-        }`}>
-          {useFirebase ? <Wifi size={12} /> : <WifiOff size={12} />}
-          <span>{useFirebase ? 'Online Mode' : 'Offline Mode'}</span>
-        </div>
-      </motion.div>
+  // Load comments for selected post
+  useEffect(() => {
+    if (!selectedPost) return;
 
-      {/* Auth Form */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <GlassCard className="max-w-md mx-auto w-full" hover={false}>
-          {/* Tab Switcher */}
-          <div className="flex gap-2 mb-6 p-1 bg-white/5 rounded-xl">
-            <button
-              onClick={() => setIsLogin(true)}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                isLogin ? 'bg-primary text-white shadow-lg' : 'text-white/60'
-              }`}
-            >
-              Login
-            </button>
-            <button
-              onClick={() => setIsLogin(false)}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                !isLogin ? 'bg-primary text-white shadow-lg' : 'text-white/60'
-              }`}
-            >
-              Sign Up
-            </button>
+    console.log('💬 Loading comments for post:', selectedPost.id);
+
+    if (unsubscribeCommentsRef.current) {
+      unsubscribeCommentsRef.current();
+      unsubscribeCommentsRef.current = null;
+    }
+
+    if (isFirebaseConfigured()) {
+      unsubscribeCommentsRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
+        console.log('💬 Received comments:', firebaseComments.length);
+        
+        const formattedComments: Comment[] = firebaseComments.map(c => ({
+          id: String(c.id),
+          postId: String(c.postId || selectedPost.id),
+          userId: String(c.userId || ''),
+          userName: c.userName || 'Anonymous',
+          content: c.content || '',
+          timestamp: c.createdAt || Date.now()
+        }));
+        
+        formattedComments.sort((a, b) => a.timestamp - b.timestamp);
+        
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: formattedComments
+        }));
+      });
+    } else {
+      // Load from IndexedDB
+      loadCommentsFromIndexedDB(selectedPost);
+    }
+
+    return () => {
+      if (unsubscribeCommentsRef.current) {
+        unsubscribeCommentsRef.current();
+        unsubscribeCommentsRef.current = null;
+      }
+    };
+  }, [selectedPost?.id]);
+
+  const loadCommentsFromIndexedDB = async (post: Post) => {
+    try {
+      const postIdNum = post.odId || parseInt(post.id) || 0;
+      const localComments = await db.forumComments
+        .where('postId')
+        .equals(postIdNum)
+        .toArray();
+      
+      const formattedComments: Comment[] = localComments.map(c => ({
+        id: String(c.id),
+        postId: String(c.postId),
+        userId: String(c.userId),
+        userName: c.userName || 'User',
+        content: c.content,
+        timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
+      }));
+      
+      setComments(prev => ({
+        ...prev,
+        [post.id]: formattedComments
+      }));
+    } catch (err) {
+      console.error('Error loading comments:', err);
+    }
+  };
+
+  const handleCreatePost = useCallback(async () => {
+    if (!newPost.trim() || !currentUser || submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+    const postContent = newPost.trim();
+    
+    console.log('📝 Creating post...');
+
+    try {
+      if (isFirebaseConfigured()) {
+        // Create in Firebase - the subscription will update the UI
+        const postId = await createPost(
+          String(currentUser.id),
+          currentUser.fullName,
+          currentUser.academicLevel,
+          postContent
+        );
+        
+        console.log('✅ Post created in Firebase:', postId);
+        setNewPost('');
+        
+      } else {
+        // Create in IndexedDB
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+          
+        const localPostId = await db.forumPosts.add({
+          userId: userIdNum,
+          userName: currentUser.fullName,
+          userLevel: currentUser.academicLevel,
+          content: postContent,
+          timestamp: new Date(),
+          likes: 0
+        });
+        
+        console.log('✅ Post created in IndexedDB:', localPostId);
+        
+        // Add to local state immediately
+        const newPostObj: Post = {
+          id: String(localPostId),
+          odId: localPostId as number,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          userLevel: currentUser.academicLevel,
+          content: postContent,
+          timestamp: Date.now(),
+          likes: 0
+        };
+        setPosts(prev => [newPostObj, ...prev]);
+        setNewPost('');
+      }
+    } catch (err) {
+      console.error('❌ Error creating post:', err);
+      setError('Failed to create post. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newPost, currentUser, submitting]);
+
+  const handleLike = useCallback(async (post: Post) => {
+    if (!currentUser) return;
+
+    const userId = String(currentUser.id);
+    const isLiked = likedPosts.has(post.id);
+
+    // Optimistic update
+    setLikedPosts(prev => {
+      const newSet = new Set(prev);
+      if (isLiked) {
+        newSet.delete(post.id);
+      } else {
+        newSet.add(post.id);
+      }
+      return newSet;
+    });
+
+    setPosts(prev => prev.map(p => {
+      if (p.id === post.id) {
+        return {
+          ...p,
+          likes: isLiked ? Math.max(0, p.likes - 1) : p.likes + 1
+        };
+      }
+      return p;
+    }));
+
+    try {
+      if (isFirebaseConfigured()) {
+        await toggleLikePost(post.id, userId);
+      } else {
+        const postIdNum = post.odId || parseInt(post.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
+        
+        if (isLiked) {
+          await db.postLikes.where({ postId: postIdNum, userId: userIdNum }).delete();
+          await db.forumPosts.update(postIdNum, { likes: Math.max(0, post.likes - 1) });
+        } else {
+          await db.postLikes.add({ postId: postIdNum, userId: userIdNum });
+          await db.forumPosts.update(postIdNum, { likes: post.likes + 1 });
+        }
+      }
+    } catch (err) {
+      console.error('Error toggling like:', err);
+      // Revert optimistic update
+      setLikedPosts(prev => {
+        const newSet = new Set(prev);
+        if (isLiked) {
+          newSet.add(post.id);
+        } else {
+          newSet.delete(post.id);
+        }
+        return newSet;
+      });
+    }
+  }, [currentUser, likedPosts]);
+
+  const handleAddComment = useCallback(async () => {
+    if (!newComment.trim() || !selectedPost || !currentUser || submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+    const commentContent = newComment.trim();
+
+    console.log('💬 Adding comment...');
+
+    try {
+      if (isFirebaseConfigured()) {
+        // Create in Firebase - subscription will update UI
+        const commentId = await addComment(
+          selectedPost.id,
+          String(currentUser.id),
+          currentUser.fullName,
+          commentContent
+        );
+        
+        console.log('✅ Comment created in Firebase:', commentId);
+        setNewComment('');
+        
+      } else {
+        // Create in IndexedDB
+        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+        
+        const localCommentId = await db.forumComments.add({
+          postId: postIdNum,
+          userId: userIdNum,
+          userName: currentUser.fullName,
+          content: commentContent,
+          timestamp: new Date()
+        });
+        
+        console.log('✅ Comment created in IndexedDB:', localCommentId);
+        
+        // Add to local state
+        const newCommentObj: Comment = {
+          id: String(localCommentId),
+          postId: selectedPost.id,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          content: commentContent,
+          timestamp: Date.now()
+        };
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: [...(prev[selectedPost.id] || []), newCommentObj]
+        }));
+        setNewComment('');
+      }
+    } catch (err) {
+      console.error('❌ Error adding comment:', err);
+      setError('Failed to add comment. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newComment, selectedPost, currentUser, submitting]);
+
+  const handleDeletePost = async (postId: string) => {
+    if (!currentUser) return;
+    
+    try {
+      if (isFirebaseConfigured()) {
+        await firebaseDeletePost(postId);
+      } else {
+        const postIdNum = parseInt(postId) || 0;
+        await db.forumPosts.delete(postIdNum);
+        setPosts(prev => prev.filter(p => p.id !== postId));
+      }
+    } catch (err) {
+      console.error('Error deleting post:', err);
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!selectedPost) return;
+    
+    try {
+      const commentIdNum = parseInt(commentId) || 0;
+      await db.forumComments.delete(commentIdNum);
+      setComments(prev => ({
+        ...prev,
+        [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== commentId) || []
+      }));
+    } catch (err) {
+      console.error('Error deleting comment:', err);
+    }
+  };
+
+  const handleRefresh = () => {
+    setLoading(true);
+    setError(null);
+    
+    // Reset and reload
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+    
+    // Trigger reload by updating a dependency
+    setPosts([]);
+    
+    setTimeout(() => {
+      if (isFirebaseConfigured()) {
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
+          }));
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+        });
+      } else {
+        loadFromIndexedDB();
+      }
+    }, 500);
+  };
+
+  const formatTime = (timestamp: number) => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${days}d ago`;
+  };
+
+  const isAdmin = currentUser?.email === 'ememzyvisuals@gmail.com';
+
+  if (!currentUser) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center p-4 ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
+        <div className="text-center">
+          <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Please login to access the forum</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
+      {/* Header */}
+      <div className={`sticky top-0 z-40 backdrop-blur-xl border-b ${isDark ? 'bg-black/80 border-white/10' : 'bg-white/80 border-gray-200'}`}>
+        <div className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            {selectedPost ? (
+              <button
+                onClick={() => setSelectedPost(null)}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+              >
+                <ArrowLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+              </button>
+            ) : (
+              <button
+                onClick={onOpenMenu}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+              >
+                <Menu className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+              </button>
+            )}
+            <div>
+              <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                {selectedPost ? 'Discussion' : 'Community'}
+              </h1>
+              <div className="flex items-center gap-1 text-xs">
+                {connectionStatus === 'connecting' ? (
+                  <>
+                    <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
+                    <span className="text-yellow-400">Connecting...</span>
+                  </>
+                ) : connectionStatus === 'connected' ? (
+                  <>
+                    <Wifi className="w-3 h-3 text-green-400" />
+                    <span className="text-green-400">Live • All users synced</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-3 h-3 text-yellow-400" />
+                    <span className="text-yellow-400">Offline Mode</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+          
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+          >
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''} ${isDark ? 'text-white' : 'text-gray-900'}`} />
+          </button>
+        </div>
+      </div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="mx-4 mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-400 text-sm">{error}</span>
+        </div>
+      )}
+
+      {/* Loading State */}
+      {loading && (
+        <div className="flex flex-col items-center justify-center py-20">
+          <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-4" />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Loading posts...</p>
+        </div>
+      )}
+
+      {/* Post Detail View */}
+      {!loading && selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Selected Post */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
+          >
+            <div className="flex items-start gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                <User className="w-5 h-5 text-white" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedPost.userName}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
+                    {selectedPost.userLevel}
+                  </span>
+                </div>
+                <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                  <Clock className="w-3 h-3" />
+                  <span>{formatTime(selectedPost.timestamp)}</span>
+                </div>
+              </div>
+            </div>
+            <p className={`text-base leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{selectedPost.content}</p>
+            <div className={`flex items-center gap-4 mt-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+              <button
+                onClick={() => handleLike(selectedPost)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                  likedPosts.has(selectedPost.id)
+                    ? 'bg-red-500/20 text-red-400'
+                    : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                <Heart className={`w-4 h-4 ${likedPosts.has(selectedPost.id) ? 'fill-current' : ''}`} />
+                <span className="text-sm">{selectedPost.likes}</span>
+              </button>
+              <div className={`flex items-center gap-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <MessageCircle className="w-4 h-4" />
+                <span className="text-sm">{comments[selectedPost.id]?.length || 0}</span>
+              </div>
+            </div>
+          </motion.div>
+
+          {/* Comments */}
+          <div className="mb-6">
+            <h3 className={`text-lg font-semibold mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+              Comments ({comments[selectedPost.id]?.length || 0})
+            </h3>
+            
+            <div className="space-y-3">
+              <AnimatePresence>
+                {comments[selectedPost.id]?.map((comment, index) => (
+                  <motion.div
+                    key={comment.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    transition={{ delay: index * 0.05 }}
+                    className={`rounded-xl p-3 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-gray-50 border-gray-200'}`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-green-500 to-teal-600 flex items-center justify-center">
+                          <User className="w-3.5 h-3.5 text-white" />
+                        </div>
+                        <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>{comment.userName}</span>
+                        <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{formatTime(comment.timestamp)}</span>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteComment(comment.id)}
+                          className={`p-1.5 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <p className={`text-sm pl-9 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{comment.content}</p>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              
+              {(!comments[selectedPost.id] || comments[selectedPost.id].length === 0) && (
+                <div className="text-center py-8">
+                  <MessageCircle className={`w-12 h-12 mx-auto mb-3 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                  <p className={isDark ? 'text-gray-500' : 'text-gray-400'}>No comments yet. Be the first!</p>
+                </div>
+              )}
+            </div>
           </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <AnimatePresence mode="wait">
-              {!isLogin && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                >
-                  <Input
-                    label="Full Name"
-                    placeholder="Enter your full name"
-                    icon={<User size={18} />}
-                    value={formData.fullName}
-                    onChange={e => setFormData({ ...formData, fullName: e.target.value })}
-                    required={!isLogin}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <Input
-              label="Email"
-              type="email"
-              placeholder="Enter your email"
-              icon={<Mail size={18} />}
-              value={formData.email}
-              onChange={e => setFormData({ ...formData, email: e.target.value })}
-              required
-            />
-
-            <div className="relative">
-              <Input
-                label="Password"
-                type={showPassword ? 'text' : 'password'}
-                placeholder="Enter your password"
-                icon={<Lock size={18} />}
-                value={formData.password}
-                onChange={e => setFormData({ ...formData, password: e.target.value })}
-                required
+          {/* Add Comment Input - Fixed at bottom */}
+          <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-xl border-t p-4 ${isDark ? 'bg-black/90 border-white/10' : 'bg-white/90 border-gray-200'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+            <div className="flex gap-3 max-w-lg mx-auto">
+              <input
+                type="text"
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleAddComment()}
+                placeholder="Write a comment..."
+                className={`flex-1 border rounded-xl px-4 py-3 text-base focus:outline-none focus:border-blue-500 ${
+                  isDark 
+                    ? 'bg-white/10 border-white/20 text-white placeholder-gray-500' 
+                    : 'bg-gray-100 border-gray-200 text-gray-900 placeholder-gray-400'
+                }`}
               />
               <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-9 text-white/40 hover:text-white/60"
+                onClick={handleAddComment}
+                disabled={!newComment.trim() || submitting}
+                className="w-12 h-12 rounded-xl bg-blue-500 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                {submitting ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5 text-white" />
+                )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
 
-            <AnimatePresence mode="wait">
-              {!isLogin && (
+      {/* Posts List View */}
+      {!loading && !selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Connection Info Banner */}
+          {connectionStatus === 'offline' && (
+            <div className={`mb-4 p-3 rounded-xl flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-yellow-50 border border-yellow-200'}`}>
+              <WifiOff className="w-5 h-5 text-yellow-500 flex-shrink-0" />
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${isDark ? 'text-yellow-400' : 'text-yellow-700'}`}>Offline Mode</p>
+                <p className={`text-xs ${isDark ? 'text-yellow-500/70' : 'text-yellow-600'}`}>
+                  Posts are saved locally. Add Firebase config to sync with all users.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Create Post */}
+          <div className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}>
+            <textarea
+              value={newPost}
+              onChange={(e) => setNewPost(e.target.value)}
+              placeholder="Share something with the community..."
+              rows={3}
+              className={`w-full bg-transparent resize-none focus:outline-none text-base ${
+                isDark ? 'text-white placeholder-gray-500' : 'text-gray-900 placeholder-gray-400'
+              }`}
+            />
+            <div className="flex justify-between items-center mt-3">
+              <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                {newPost.length}/500
+              </span>
+              <button
+                onClick={handleCreatePost}
+                disabled={!newPost.trim() || submitting || newPost.length > 500}
+                className="px-5 py-2.5 rounded-xl bg-blue-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {submitting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Post
+              </button>
+            </div>
+          </div>
+
+          {/* Posts */}
+          <div className="space-y-4">
+            <AnimatePresence>
+              {posts.map((post, index) => (
                 <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
+                  key={post.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  transition={{ delay: index * 0.03 }}
+                  className={`backdrop-blur-xl rounded-2xl p-4 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
                 >
-                  <Select
-                    label="Academic Level"
-                    value={formData.academicLevel}
-                    onChange={e => setFormData({ ...formData, academicLevel: e.target.value as 'JSS' | 'SSS' | 'JAMB' | 'University' })}
-                    options={[
-                      { value: 'JSS', label: 'Junior Secondary School (JSS)' },
-                      { value: 'SSS', label: 'Senior Secondary School (SSS)' },
-                      { value: 'JAMB', label: 'JAMB Candidate' },
-                      { value: 'University', label: 'University Student' }
-                    ]}
-                  />
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                      <User className="w-5 h-5 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{post.userName}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
+                          {post.userLevel}
+                        </span>
+                      </div>
+                      <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                        <Clock className="w-3 h-3" />
+                        <span>{formatTime(post.timestamp)}</span>
+                      </div>
+                    </div>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleDeletePost(post.id)}
+                        className={`p-2 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  
+                  <p className={`text-base leading-relaxed mb-4 ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{post.content}</p>
+                  
+                  <div className={`flex items-center gap-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+                    <button
+                      onClick={() => handleLike(post)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                        likedPosts.has(post.id)
+                          ? 'bg-red-500/20 text-red-400'
+                          : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
+                      }`}
+                    >
+                      <Heart className={`w-4 h-4 ${likedPosts.has(post.id) ? 'fill-current' : ''}`} />
+                      <span className="text-sm">{post.likes}</span>
+                    </button>
+                    <button
+                      onClick={() => setSelectedPost(post)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'}`}
+                    >
+                      <MessageCircle className="w-4 h-4" />
+                      <span className="text-sm">Comment</span>
+                    </button>
+                  </div>
                 </motion.div>
-              )}
+              ))}
             </AnimatePresence>
 
-            {error && (
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-error text-sm text-center"
-              >
-                {error}
-              </motion.p>
+            {posts.length === 0 && (
+              <div className="text-center py-12">
+                <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                <h3 className={`text-xl font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  No posts yet
+                </h3>
+                <p className={isDark ? 'text-gray-400' : 'text-gray-500'}>Be the first to start a discussion!</p>
+              </div>
             )}
-
-            <Button
-              type="submit"
-              fullWidth
-              disabled={loading}
-              icon={<GraduationCap size={20} />}
-            >
-              {loading ? 'Please wait...' : isLogin ? 'Login' : 'Create Account'}
-            </Button>
-          </form>
-        </GlassCard>
-      </motion.div>
-
-      {/* Firebase info */}
-      {!useFirebase && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="text-center mt-6 px-4"
-        >
-          <p className="text-yellow-400/80 text-xs">
-            Running in offline mode. Data will be stored locally on this device.
-          </p>
-        </motion.div>
+          </div>
+        </div>
       )}
     </div>
   );
 }
+
+export default ForumPage;
