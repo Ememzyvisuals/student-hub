@@ -1,1562 +1,871 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Users, 
-  MessageSquare, 
-  BarChart3, 
-  Trash2,
-  Shield,
-  Lock,
-  Eye,
-  EyeOff,
-  Activity,
-  TrendingUp,
-  Star,
-  Target,
-  BookOpen,
-  UserCheck,
-  Zap,
-  RefreshCw,
-  Filter,
-  Upload,
-  Plus,
-  FileJson,
-  Download,
-  CheckCircle,
-  XCircle,
-  AlertCircle,
-  Search,
-  ChevronDown,
-  FileText
-} from 'lucide-react';
-import { PageHeader } from '../components/layout/PageHeader';
-import { GlassCard } from '@/components/ui/GlassCard';
-import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
-import { db, User, ForumPost, UploadedQuestion } from '@/lib/db';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, Legend } from 'recharts';
 import {
-  isFirebaseConfigured,
-  subscribeToUsers,
+  MessageSquare,
+  Heart,
+  Send,
+  ArrowLeft,
+  Menu,
+  Wifi,
+  WifiOff,
+  Loader2,
+  User,
+  Clock,
+  MessageCircle,
+  Trash2,
+  AlertCircle,
+  RefreshCw
+} from 'lucide-react';
+import { useStore } from '../store/useStore';
+import { db } from '../lib/db';
+import {
   subscribeToPosts,
-  subscribeToFeedback,
-  subscribeToUploadedQuestions,
-  uploadQuestion as firebaseUploadQuestion
-} from '@/lib/firebase';
+  subscribeToComments,
+  createPost,
+  addComment,
+  toggleLikePost,
+  isFirebaseConfigured,
+  deletePost as firebaseDeletePost,
+  subscribeToUserLikes
+} from '../lib/firebase';
 
-const ADMIN_EMAIL = 'ememzyvisuals@gmail.com';
-const ADMIN_PASSWORD = 'April232023';
-const SECURITY_ANSWER = 'guava';
-
-interface AdminPageProps {
-  onBack?: () => void;
-  onOpenMenu: () => void;
+interface ForumPageProps {
+  onOpenMenu?: () => void;
 }
 
-interface UserAnalytics extends User {
-  accuracy: number;
+interface Post {
+  id: string;
+  odId?: number;
+  userId: string;
+  userName: string;
+  userLevel: string;
+  content: string;
+  timestamp: number;
+  likes: number;
 }
 
-interface Feedback {
-  id?: number;
-  userId: number;
-  rating: number;
-  review: string;
-  timestamp: Date;
-  userName?: string;
+interface Comment {
+  id: string;
+  postId: string;
+  userId: string;
+  userName: string;
+  content: string;
+  timestamp: number;
 }
 
-const COLORS = ['#007AFF', '#5856D6', '#34C759', '#FF9500', '#FF3B30', '#AF52DE'];
-
-const LEVELS = ['JSS', 'SSS', 'JAMB', 'University'] as const;
-const DIFFICULTIES = ['Easy', 'Medium', 'Hard'] as const;
-
-const SUBJECTS_BY_LEVEL = {
-  JSS: ['Mathematics', 'English', 'Basic Science', 'Social Studies', 'Civic Education'],
-  SSS: ['Mathematics', 'English', 'Physics', 'Chemistry', 'Biology', 'Economics', 'Government', 'Literature'],
-  JAMB: ['Mathematics', 'English', 'Physics', 'Chemistry', 'Biology', 'Economics', 'Government', 'Literature', 'Commerce', 'Accounting', 'Geography'],
-  University: ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'Engineering', 'Computer Science', 'Economics', 'Law']
-};
-
-export function AdminPage({ onOpenMenu }: AdminPageProps) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [loginStep, setLoginStep] = useState<'credentials' | 'security'>('credentials');
-  const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState('');
+export function ForumPage({ onOpenMenu }: ForumPageProps) {
+  const { currentUser, theme } = useStore();
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [comments, setComments] = useState<Record<string, Comment[]>>({});
+  const [newPost, setNewPost] = useState('');
+  const [newComment, setNewComment] = useState('');
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [loading, setLoading] = useState(true);
+  // isOnline is now replaced by connectionStatus
+  const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   
-  const [credentials, setCredentials] = useState({ email: '', password: '' });
-  const [securityAnswer, setSecurityAnswer] = useState('');
-  
-  const [users, setUsers] = useState<UserAnalytics[]>([]);
-  const [posts, setPosts] = useState<ForumPost[]>([]);
-  const [feedback, setFeedback] = useState<Feedback[]>([]);
-  const [uploadedQuestions, setUploadedQuestions] = useState<UploadedQuestion[]>([]);
-  const [, setAllMockExams] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'posts' | 'feedback' | 'analytics' | 'questions'>('overview');
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const unsubscribePostsRef = useRef<(() => void) | null>(null);
+  const unsubscribeCommentsRef = useRef<(() => void) | null>(null);
+  const unsubscribeLikesRef = useRef<(() => void) | null>(null);
 
-  // Question Upload States
-  const [uploadMode, setUploadMode] = useState<'single' | 'bulk' | 'json'>('single');
-  const [singleQuestion, setSingleQuestion] = useState({
-    text: '',
-    optionA: '',
-    optionB: '',
-    optionC: '',
-    optionD: '',
-    correctAnswer: 'A' as 'A' | 'B' | 'C' | 'D',
-    explanation: '',
-    subject: '',
-    topic: '',
-    difficulty: 'Medium' as 'Easy' | 'Medium' | 'Hard',
-    level: 'JAMB' as 'JSS' | 'SSS' | 'JAMB' | 'University'
-  });
-  const [jsonInput, setJsonInput] = useState('');
-  const [uploadStatus, setUploadStatus] = useState<{
-    success: number;
-    failed: number;
-    errors: string[];
-  } | null>(null);
-  const [questionFilter, setQuestionFilter] = useState({ level: '', subject: '', search: '' });
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isDark = theme === 'dark';
 
-  // Real-time stats
-  const [stats, setStats] = useState({
-    totalUsers: 0,
-    totalQuestions: 0,
-    totalCorrect: 0,
-    totalPosts: 0,
-    totalComments: 0,
-    totalLikes: 0,
-    totalMockExams: 0,
-    totalFlashcards: 0,
-    totalFeedback: 0,
-    averageRating: 0,
-    activeToday: 0,
-    newUsersToday: 0,
-    newUsersThisWeek: 0,
-    avgAccuracy: 0,
-    totalStudyMinutes: 0,
-    totalUploadedQuestions: 0
-  });
-
-  const [levelDistribution, setLevelDistribution] = useState<any[]>([]);
-  const [dailyActivity, setDailyActivity] = useState<any[]>([]);
-  const [performanceByLevel, setPerformanceByLevel] = useState<any[]>([]);
-  const [topUsers, setTopUsers] = useState<UserAnalytics[]>([]);
-
-  const loadData = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      // Load all users with analytics
-      const allUsers = await db.users.toArray();
-      const usersWithAnalytics: UserAnalytics[] = allUsers.map(user => ({
-        ...user,
-        accuracy: user.totalQuestionsAnswered > 0 
-          ? Math.round((user.totalCorrect / user.totalQuestionsAnswered) * 100) 
-          : 0
-      }));
-      setUsers(usersWithAnalytics);
-      
-      // Load posts
-      const allPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
-      setPosts(allPosts);
-      
-      // Load comments
-      const allComments = await db.forumComments.toArray();
-      
-      // Load mock exams
-      const allMockExams = await db.mockExamResults.toArray();
-      setAllMockExams(allMockExams);
-      
-      // Load flashcards
-      const allFlashcards = await db.flashcards.toArray();
-      
-      // Load uploaded questions
-      const allUploadedQuestions = await db.uploadedQuestions.toArray();
-      setUploadedQuestions(allUploadedQuestions);
-      
-      // Load feedback
-      let allFeedback: Feedback[] = [];
-      try {
-        allFeedback = await (db as any).feedback?.toArray() || [];
-        allFeedback = allFeedback.map(f => {
-          const user = allUsers.find(u => u.id === f.userId);
-          return { ...f, userName: user?.fullName || 'Unknown User' };
-        });
-      } catch (e) {
-        console.log('Feedback table not available');
-      }
-      setFeedback(allFeedback);
-
-      // Calculate stats
-      const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-      const totalQuestions = allUsers.reduce((sum, u) => sum + u.totalQuestionsAnswered, 0);
-      const totalCorrect = allUsers.reduce((sum, u) => sum + u.totalCorrect, 0);
-      const totalLikes = allPosts.reduce((sum, p) => sum + p.likes, 0);
-      const avgRating = allFeedback.length > 0 
-        ? allFeedback.reduce((sum, f) => sum + f.rating, 0) / allFeedback.length 
-        : 0;
-
-      const activeToday = allUsers.filter(u => {
-        const lastActive = new Date(u.createdAt);
-        return lastActive >= today;
-      }).length;
-
-      const newUsersToday = allUsers.filter(u => {
-        const created = new Date(u.createdAt);
-        return created >= today;
-      }).length;
-
-      const newUsersThisWeek = allUsers.filter(u => {
-        const created = new Date(u.createdAt);
-        return created >= weekAgo;
-      }).length;
-
-      setStats({
-        totalUsers: allUsers.length,
-        totalQuestions,
-        totalCorrect,
-        totalPosts: allPosts.length,
-        totalComments: allComments.length,
-        totalLikes,
-        totalMockExams: allMockExams.length,
-        totalFlashcards: allFlashcards.length,
-        totalFeedback: allFeedback.length,
-        averageRating: Math.round(avgRating * 10) / 10,
-        activeToday,
-        newUsersToday,
-        newUsersThisWeek,
-        avgAccuracy: totalQuestions > 0 ? Math.round((totalCorrect / totalQuestions) * 100) : 0,
-        totalStudyMinutes: Math.round(allMockExams.reduce((sum, e) => sum + (e.duration || 0), 0)),
-        totalUploadedQuestions: allUploadedQuestions.filter(q => q.isActive).length
-      });
-
-      // Level distribution
-      const levels = ['JSS', 'SSS', 'JAMB', 'University'];
-      const levelDist = levels.map(level => ({
-        name: level,
-        value: allUsers.filter(u => u.academicLevel === level).length,
-        color: COLORS[levels.indexOf(level)]
-      })).filter(l => l.value > 0);
-      setLevelDistribution(levelDist);
-
-      // Performance by level
-      const perfByLevel = levels.map(level => {
-        const levelUsers = allUsers.filter(u => u.academicLevel === level);
-        const totalQ = levelUsers.reduce((sum, u) => sum + u.totalQuestionsAnswered, 0);
-        const totalC = levelUsers.reduce((sum, u) => sum + u.totalCorrect, 0);
-        return {
-          level,
-          users: levelUsers.length,
-          questions: totalQ,
-          accuracy: totalQ > 0 ? Math.round((totalC / totalQ) * 100) : 0
-        };
-      }).filter(l => l.users > 0);
-      setPerformanceByLevel(perfByLevel);
-
-      // Daily activity
-      const dailyAct = [];
-      for (let i = 6; i >= 0; i--) {
-        const date = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
-        const dateStr = date.toLocaleDateString('en-US', { weekday: 'short' });
-        const dayExams = allMockExams.filter(e => {
-          const examDate = new Date(e.timestamp);
-          return examDate.toDateString() === date.toDateString();
-        });
-        dailyAct.push({
-          day: dateStr,
-          exams: dayExams.length,
-          questions: dayExams.reduce((sum, e) => sum + (e.totalQuestions || 0), 0)
-        });
-      }
-      setDailyActivity(dailyAct);
-
-      // Top users
-      const topUsersList = usersWithAnalytics
-        .filter(u => u.totalQuestionsAnswered >= 10)
-        .sort((a, b) => b.accuracy - a.accuracy)
-        .slice(0, 5);
-      setTopUsers(topUsersList);
-
-      setLastRefresh(new Date());
-    } catch (error) {
-      console.error('Error loading admin data:', error);
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, []);
-
-  // Real-time listeners for Firebase data
+  // Load posts
   useEffect(() => {
-    if (!isAuthenticated) return;
-    
-    const unsubscribers: (() => void)[] = [];
-    
-    if (isFirebaseConfigured()) {
-      // Subscribe to real-time Firebase data
-      console.log('🔥 Admin: Using Firebase real-time listeners');
-      
-      // Users real-time
-      unsubscribers.push(subscribeToUsers((firebaseUsers) => {
-        const usersWithAnalytics: UserAnalytics[] = firebaseUsers.map(user => ({
-          id: parseInt(user.id) || 0,
-          email: user.email,
-          fullName: user.name,
-          password: '',
-          academicLevel: (user.level as 'JSS' | 'SSS' | 'JAMB' | 'University') || 'JAMB',
-          createdAt: new Date(user.createdAt),
-          streak: user.streak || 0,
-          lastActiveDate: user.lastActiveDate || new Date().toDateString(),
-          totalQuestionsAnswered: user.questionsAnswered || 0,
-          totalCorrect: user.correctAnswers || 0,
-          accuracy: user.questionsAnswered > 0 
-            ? Math.round((user.correctAnswers / user.questionsAnswered) * 100) 
-            : 0
-        }));
-        setUsers(usersWithAnalytics);
-        console.log(`✅ Real-time: ${usersWithAnalytics.length} users loaded`);
-      }));
-      
-      // Posts real-time
-      unsubscribers.push(subscribeToPosts((firebasePosts) => {
-        const convertedPosts = firebasePosts.map(p => ({
-          id: parseInt(p.id) || 0,
-          userId: parseInt(p.userId) || 0,
-          userName: p.userName,
-          userLevel: p.userLevel,
-          content: p.content,
-          likes: p.likes || 0,
-          timestamp: new Date(p.createdAt)
-        }));
-        setPosts(convertedPosts);
-        console.log(`✅ Real-time: ${convertedPosts.length} posts loaded`);
-      }));
-      
-      // Feedback real-time
-      unsubscribers.push(subscribeToFeedback((firebaseFeedback) => {
-        const convertedFeedback = firebaseFeedback.map(f => ({
-          id: f.id,
-          userId: f.userId,
-          rating: f.rating,
-          review: f.review,
-          timestamp: new Date(f.createdAt),
-          userName: f.userName || 'Unknown User'
-        }));
-        setFeedback(convertedFeedback);
-        console.log(`✅ Real-time: ${convertedFeedback.length} feedback loaded`);
-      }));
-      
-      // Uploaded questions real-time
-      unsubscribers.push(subscribeToUploadedQuestions((firebaseQuestions) => {
-        const convertedQuestions = firebaseQuestions.map(q => ({
-          id: parseInt(q.id) || 0,
-          text: q.text,
-          options: q.options,
-          correctAnswer: q.correctAnswer,
-          explanation: q.explanation || '',
-          subject: q.subject,
-          topic: q.topic,
-          difficulty: q.difficulty,
-          level: q.level,
-          uploadedBy: q.uploadedBy || 'admin',
-          uploadedAt: new Date(q.uploadedAt),
-          isActive: q.isActive !== false
-        }));
-        setUploadedQuestions(convertedQuestions);
-        console.log(`✅ Real-time: ${convertedQuestions.length} uploaded questions loaded`);
-      }));
-      
-    } else {
-      // Fallback to IndexedDB with polling
-      console.log('📦 Admin: Using IndexedDB (offline mode)');
-      loadData();
-      const interval = setInterval(loadData, 30000);
-      unsubscribers.push(() => clearInterval(interval));
-    }
-    
-    return () => {
-      unsubscribers.forEach(unsub => unsub());
-    };
-  }, [isAuthenticated, loadData]);
-
-  const handleLogin = () => {
-    setError('');
-    if (credentials.email.toLowerCase() !== ADMIN_EMAIL || credentials.password !== ADMIN_PASSWORD) {
-      setError('Invalid credentials');
-      return;
-    }
-    setLoginStep('security');
-  };
-
-  const handleSecurityCheck = () => {
-    if (securityAnswer.toLowerCase().trim() !== SECURITY_ANSWER) {
-      setError('Incorrect answer');
-      return;
-    }
-    setIsAuthenticated(true);
-  };
-
-  const handleDeletePost = async (postId: number) => {
-    await db.forumPosts.delete(postId);
-    await db.forumComments.where('postId').equals(postId).delete();
-    loadData();
-  };
-
-  const handleDeleteFeedback = async (feedbackId: number) => {
-    try {
-      await (db as any).feedback?.delete(feedbackId);
-      loadData();
-    } catch (e) {
-      console.error('Error deleting feedback:', e);
-    }
-  };
-
-  // Question Management Functions
-  const validateQuestion = (q: any): { valid: boolean; error?: string } => {
-    if (!q.text || q.text.trim().length < 10) return { valid: false, error: 'Question text must be at least 10 characters' };
-    if (!q.options || !Array.isArray(q.options) || q.options.length !== 4) return { valid: false, error: 'Must have exactly 4 options' };
-    if (!['A', 'B', 'C', 'D'].includes(q.correctAnswer)) return { valid: false, error: 'Correct answer must be A, B, C, or D' };
-    if (!q.subject || q.subject.trim().length === 0) return { valid: false, error: 'Subject is required' };
-    if (!q.topic || q.topic.trim().length === 0) return { valid: false, error: 'Topic is required' };
-    if (!LEVELS.includes(q.level)) return { valid: false, error: 'Invalid level' };
-    if (!DIFFICULTIES.includes(q.difficulty)) return { valid: false, error: 'Invalid difficulty' };
-    return { valid: true };
-  };
-
-  const handleAddSingleQuestion = async () => {
-    const question: Omit<UploadedQuestion, 'id'> = {
-      text: singleQuestion.text.trim(),
-      options: [singleQuestion.optionA, singleQuestion.optionB, singleQuestion.optionC, singleQuestion.optionD],
-      correctAnswer: singleQuestion.correctAnswer,
-      explanation: singleQuestion.explanation.trim(),
-      subject: singleQuestion.subject.trim(),
-      topic: singleQuestion.topic.trim(),
-      difficulty: singleQuestion.difficulty,
-      level: singleQuestion.level,
-      uploadedBy: 'admin',
-      uploadedAt: new Date(),
-      isActive: true
-    };
-
-    const validation = validateQuestion(question);
-    if (!validation.valid) {
-      setUploadStatus({ success: 0, failed: 1, errors: [validation.error || 'Invalid question'] });
+    if (!currentUser) {
+      setLoading(false);
       return;
     }
 
-    try {
-      // Save to Firebase if configured, otherwise IndexedDB
-      if (isFirebaseConfigured()) {
-        await firebaseUploadQuestion(question);
-        console.log('✅ Question uploaded to Firebase');
-      } else {
-        await db.uploadedQuestions.add(question);
-        console.log('📦 Question saved to IndexedDB (offline mode)');
+    console.log('🔄 Initializing forum...');
+    setLoading(true);
+    setError(null);
+    setConnectionStatus('connecting');
+
+    // Cleanup previous subscriptions
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+
+    const firebaseConfigured = isFirebaseConfigured();
+    console.log('📡 Firebase configured:', firebaseConfigured);
+
+    if (firebaseConfigured) {
+      // Firebase is configured
+      
+      // Set a timeout for slow connections
+      const timeoutId = setTimeout(() => {
+        if (loading) {
+          console.log('⏱️ Connection timeout - showing offline mode');
+          setConnectionStatus('offline');
+          setLoading(false);
+          loadFromIndexedDB();
+        }
+      }, 10000);
+
+      // Subscribe to posts from Firebase
+      try {
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          clearTimeout(timeoutId);
+          console.log('📥 Received posts from Firebase:', firebasePosts.length);
+          
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
+          }));
+          
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+          setConnectionStatus('connected');
+        });
+
+        // Subscribe to user likes
+        unsubscribeLikesRef.current = subscribeToUserLikes(String(currentUser.id), (likedIds) => {
+          console.log('❤️ User liked posts:', likedIds.size);
+          setLikedPosts(likedIds);
+        });
+
+      } catch (err) {
+        console.error('❌ Firebase subscription error:', err);
+        clearTimeout(timeoutId);
+        setError('Failed to connect to server');
+        setConnectionStatus('offline');
+        setLoading(false);
+        loadFromIndexedDB();
       }
-      
-      setUploadStatus({ success: 1, failed: 0, errors: [] });
-      setSingleQuestion({
-        text: '',
-        optionA: '',
-        optionB: '',
-        optionC: '',
-        optionD: '',
-        correctAnswer: 'A',
-        explanation: '',
-        subject: '',
-        topic: '',
-        difficulty: 'Medium',
-        level: 'JAMB'
-      });
-      
-      // Only need to manually reload for IndexedDB (Firebase has real-time listeners)
-      if (!isFirebaseConfigured()) {
-        loadData();
-      }
-    } catch (e) {
-      console.error('Error uploading question:', e);
-      setUploadStatus({ success: 0, failed: 1, errors: ['Failed to save question'] });
-    }
-  };
 
-  const handleJsonUpload = async () => {
-    setUploadStatus(null);
-    let questions: any[];
-    
-    try {
-      questions = JSON.parse(jsonInput);
-      if (!Array.isArray(questions)) {
-        questions = [questions];
-      }
-    } catch (e) {
-      setUploadStatus({ success: 0, failed: 1, errors: ['Invalid JSON format'] });
-      return;
-    }
-
-    let success = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      const question: Omit<UploadedQuestion, 'id'> = {
-        text: q.text || '',
-        options: q.options || [q.optionA, q.optionB, q.optionC, q.optionD].filter(Boolean),
-        correctAnswer: q.correctAnswer || 'A',
-        explanation: q.explanation || '',
-        subject: q.subject || '',
-        topic: q.topic || '',
-        difficulty: q.difficulty || 'Medium',
-        level: q.level || 'JAMB',
-        uploadedBy: 'admin',
-        uploadedAt: new Date(),
-        isActive: true
+      return () => {
+        clearTimeout(timeoutId);
       };
 
-      const validation = validateQuestion(question);
-      if (!validation.valid) {
-        failed++;
-        errors.push(`Q${i + 1}: ${validation.error}`);
-        continue;
-      }
-
-      try {
-        // Save to Firebase if configured, otherwise IndexedDB
-        if (isFirebaseConfigured()) {
-          await firebaseUploadQuestion(question);
-        } else {
-          await db.uploadedQuestions.add(question);
-        }
-        success++;
-      } catch (e) {
-        failed++;
-        errors.push(`Q${i + 1}: Database error`);
-      }
+    } else {
+      // Offline mode - use IndexedDB
+      setConnectionStatus('offline');
+      loadFromIndexedDB();
     }
 
-    setUploadStatus({ success, failed, errors: errors.slice(0, 5) });
-    if (success > 0) {
-      setJsonInput('');
-      console.log(`✅ Bulk upload: ${success} questions saved to ${isFirebaseConfigured() ? 'Firebase' : 'IndexedDB'}`);
-      
-      // Only need to manually reload for IndexedDB
-      if (!isFirebaseConfigured()) {
-        loadData();
+    return () => {
+      if (unsubscribePostsRef.current) {
+        unsubscribePostsRef.current();
+        unsubscribePostsRef.current = null;
       }
-    }
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const content = e.target?.result as string;
-      setJsonInput(content);
+      if (unsubscribeLikesRef.current) {
+        unsubscribeLikesRef.current();
+        unsubscribeLikesRef.current = null;
+      }
     };
-    reader.readAsText(file);
-    
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+  }, [currentUser?.id]);
+
+  const loadFromIndexedDB = async () => {
+    try {
+      console.log('📂 Loading posts from IndexedDB...');
+      const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
+      
+      const formattedPosts: Post[] = localPosts.map(p => ({
+        id: String(p.id),
+        odId: p.id,
+        userId: String(p.userId),
+        userName: p.userName || 'Anonymous',
+        userLevel: p.userLevel || 'Student',
+        content: p.content,
+        timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
+        likes: p.likes || 0
+      }));
+      
+      setPosts(formattedPosts);
+      console.log('📂 Loaded', formattedPosts.length, 'posts from IndexedDB');
+
+      // Load liked posts from IndexedDB
+      if (currentUser) {
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
+        const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
+        setLikedPosts(new Set(localLikes.map(l => String(l.postId))));
+      }
+    } catch (err) {
+      console.error('❌ IndexedDB error:', err);
+      setError('Failed to load posts');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleToggleQuestionStatus = async (questionId: number, isActive: boolean) => {
-    await db.uploadedQuestions.update(questionId, { isActive: !isActive });
-    loadData();
-  };
+  // Load comments for selected post
+  useEffect(() => {
+    if (!selectedPost) return;
 
-  const handleDeleteQuestion = async (questionId: number) => {
-    await db.uploadedQuestions.delete(questionId);
-    loadData();
-  };
+    console.log('💬 Loading comments for post:', selectedPost.id);
 
-  const downloadSampleJson = () => {
-    const sample = [
-      {
-        text: "What is the capital of Nigeria?",
-        options: ["Lagos", "Abuja", "Kano", "Port Harcourt"],
-        correctAnswer: "B",
-        explanation: "Abuja became the capital of Nigeria in 1991, replacing Lagos.",
-        subject: "Geography",
-        topic: "Nigerian Geography",
-        difficulty: "Easy",
-        level: "JAMB"
-      },
-      {
-        text: "Solve: 2x + 5 = 15",
-        options: ["x = 3", "x = 5", "x = 7", "x = 10"],
-        correctAnswer: "B",
-        explanation: "2x + 5 = 15, 2x = 10, x = 5",
-        subject: "Mathematics",
-        topic: "Algebra",
-        difficulty: "Easy",
-        level: "JAMB"
-      }
-    ];
+    if (unsubscribeCommentsRef.current) {
+      unsubscribeCommentsRef.current();
+      unsubscribeCommentsRef.current = null;
+    }
 
-    const blob = new Blob([JSON.stringify(sample, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'sample_questions.json';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const filteredQuestions = uploadedQuestions.filter(q => {
-    if (questionFilter.level && q.level !== questionFilter.level) return false;
-    if (questionFilter.subject && q.subject !== questionFilter.subject) return false;
-    if (questionFilter.search && !q.text.toLowerCase().includes(questionFilter.search.toLowerCase())) return false;
-    return true;
-  });
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen ambient-bg flex flex-col">
-        <PageHeader title="Admin Access" onOpenMenu={onOpenMenu} />
+    if (isFirebaseConfigured()) {
+      unsubscribeCommentsRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
+        console.log('💬 Received comments:', firebaseComments.length);
         
-        <div className="flex-1 flex items-center justify-center px-4">
-          <GlassCard className="w-full max-w-sm" hover={false}>
-            <div className="text-center mb-6">
-              <div className="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-error to-orange-500 flex items-center justify-center mb-4">
-                <Shield size={32} className="text-white" />
-              </div>
-              <h2 className="text-xl font-bold text-white" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                Admin Login
-              </h2>
-            </div>
+        const formattedComments: Comment[] = firebaseComments.map(c => ({
+          id: String(c.id),
+          postId: String(c.postId || selectedPost.id),
+          userId: String(c.userId || ''),
+          userName: c.userName || 'Anonymous',
+          content: c.content || '',
+          timestamp: c.createdAt || Date.now()
+        }));
+        
+        formattedComments.sort((a, b) => a.timestamp - b.timestamp);
+        
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: formattedComments
+        }));
+      });
+    } else {
+      // Load from IndexedDB
+      loadCommentsFromIndexedDB(selectedPost);
+    }
 
-            {loginStep === 'credentials' ? (
-              <div className="space-y-4">
-                <Input
-                  label="Admin Email"
-                  type="email"
-                  value={credentials.email}
-                  onChange={e => setCredentials({ ...credentials, email: e.target.value })}
-                  placeholder="Enter admin email"
-                />
-                <div className="relative">
-                  <Input
-                    label="Password"
-                    type={showPassword ? 'text' : 'password'}
-                    value={credentials.password}
-                    onChange={e => setCredentials({ ...credentials, password: e.target.value })}
-                    placeholder="Enter password"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-9 text-white/40"
-                  >
-                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
-                </div>
-                {error && <p className="text-error text-sm text-center">{error}</p>}
-                <Button onClick={handleLogin} fullWidth icon={<Lock size={18} />}>
-                  Continue
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <Input
-                  label="What is your favorite food?"
-                  type="text"
-                  value={securityAnswer}
-                  onChange={e => setSecurityAnswer(e.target.value)}
-                  placeholder="Security answer"
-                />
-                {error && <p className="text-error text-sm text-center">{error}</p>}
-                <Button onClick={handleSecurityCheck} fullWidth>
-                  Verify
-                </Button>
-              </div>
-            )}
-          </GlassCard>
+    return () => {
+      if (unsubscribeCommentsRef.current) {
+        unsubscribeCommentsRef.current();
+        unsubscribeCommentsRef.current = null;
+      }
+    };
+  }, [selectedPost?.id]);
+
+  const loadCommentsFromIndexedDB = async (post: Post) => {
+    try {
+      const postIdNum = post.odId || parseInt(post.id) || 0;
+      const localComments = await db.forumComments
+        .where('postId')
+        .equals(postIdNum)
+        .toArray();
+      
+      const formattedComments: Comment[] = localComments.map(c => ({
+        id: String(c.id),
+        postId: String(c.postId),
+        userId: String(c.userId),
+        userName: c.userName || 'User',
+        content: c.content,
+        timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
+      }));
+      
+      setComments(prev => ({
+        ...prev,
+        [post.id]: formattedComments
+      }));
+    } catch (err) {
+      console.error('Error loading comments:', err);
+    }
+  };
+
+  const handleCreatePost = useCallback(async () => {
+    if (!newPost.trim() || !currentUser || submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+    const postContent = newPost.trim();
+    
+    console.log('📝 Creating post...');
+
+    try {
+      if (isFirebaseConfigured()) {
+        // Create in Firebase - the subscription will update the UI
+        const postId = await createPost(
+          String(currentUser.id),
+          currentUser.fullName,
+          currentUser.academicLevel,
+          postContent
+        );
+        
+        console.log('✅ Post created in Firebase:', postId);
+        setNewPost('');
+        
+      } else {
+        // Create in IndexedDB
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+          
+        const localPostId = await db.forumPosts.add({
+          userId: userIdNum,
+          userName: currentUser.fullName,
+          userLevel: currentUser.academicLevel,
+          content: postContent,
+          timestamp: new Date(),
+          likes: 0
+        });
+        
+        console.log('✅ Post created in IndexedDB:', localPostId);
+        
+        // Add to local state immediately
+        const newPostObj: Post = {
+          id: String(localPostId),
+          odId: localPostId as number,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          userLevel: currentUser.academicLevel,
+          content: postContent,
+          timestamp: Date.now(),
+          likes: 0
+        };
+        setPosts(prev => [newPostObj, ...prev]);
+        setNewPost('');
+      }
+    } catch (err) {
+      console.error('❌ Error creating post:', err);
+      setError('Failed to create post. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newPost, currentUser, submitting]);
+
+  const handleLike = useCallback(async (post: Post) => {
+    if (!currentUser) return;
+
+    const userId = String(currentUser.id);
+    const isLiked = likedPosts.has(post.id);
+
+    // Optimistic update
+    setLikedPosts(prev => {
+      const newSet = new Set(prev);
+      if (isLiked) {
+        newSet.delete(post.id);
+      } else {
+        newSet.add(post.id);
+      }
+      return newSet;
+    });
+
+    setPosts(prev => prev.map(p => {
+      if (p.id === post.id) {
+        return {
+          ...p,
+          likes: isLiked ? Math.max(0, p.likes - 1) : p.likes + 1
+        };
+      }
+      return p;
+    }));
+
+    try {
+      if (isFirebaseConfigured()) {
+        await toggleLikePost(post.id, userId);
+      } else {
+        const postIdNum = post.odId || parseInt(post.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || 0;
+        
+        if (isLiked) {
+          await db.postLikes.where({ postId: postIdNum, userId: userIdNum }).delete();
+          await db.forumPosts.update(postIdNum, { likes: Math.max(0, post.likes - 1) });
+        } else {
+          await db.postLikes.add({ postId: postIdNum, userId: userIdNum });
+          await db.forumPosts.update(postIdNum, { likes: post.likes + 1 });
+        }
+      }
+    } catch (err) {
+      console.error('Error toggling like:', err);
+      // Revert optimistic update
+      setLikedPosts(prev => {
+        const newSet = new Set(prev);
+        if (isLiked) {
+          newSet.add(post.id);
+        } else {
+          newSet.delete(post.id);
+        }
+        return newSet;
+      });
+    }
+  }, [currentUser, likedPosts]);
+
+  const handleAddComment = useCallback(async () => {
+    if (!newComment.trim() || !selectedPost || !currentUser || submitting) return;
+
+    setSubmitting(true);
+    setError(null);
+    const commentContent = newComment.trim();
+
+    console.log('💬 Adding comment...');
+
+    try {
+      if (isFirebaseConfigured()) {
+        // Create in Firebase - subscription will update UI
+        const commentId = await addComment(
+          selectedPost.id,
+          String(currentUser.id),
+          currentUser.fullName,
+          commentContent
+        );
+        
+        console.log('✅ Comment created in Firebase:', commentId);
+        setNewComment('');
+        
+      } else {
+        // Create in IndexedDB
+        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
+        const userIdNum = typeof currentUser.id === 'number' 
+          ? currentUser.id 
+          : parseInt(String(currentUser.id)) || Date.now();
+        
+        const localCommentId = await db.forumComments.add({
+          postId: postIdNum,
+          userId: userIdNum,
+          userName: currentUser.fullName,
+          content: commentContent,
+          timestamp: new Date()
+        });
+        
+        console.log('✅ Comment created in IndexedDB:', localCommentId);
+        
+        // Add to local state
+        const newCommentObj: Comment = {
+          id: String(localCommentId),
+          postId: selectedPost.id,
+          userId: String(userIdNum),
+          userName: currentUser.fullName,
+          content: commentContent,
+          timestamp: Date.now()
+        };
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: [...(prev[selectedPost.id] || []), newCommentObj]
+        }));
+        setNewComment('');
+      }
+    } catch (err) {
+      console.error('❌ Error adding comment:', err);
+      setError('Failed to add comment. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newComment, selectedPost, currentUser, submitting]);
+
+  const handleDeletePost = async (postId: string) => {
+    if (!currentUser) return;
+    
+    try {
+      if (isFirebaseConfigured()) {
+        await firebaseDeletePost(postId);
+      } else {
+        const postIdNum = parseInt(postId) || 0;
+        await db.forumPosts.delete(postIdNum);
+        setPosts(prev => prev.filter(p => p.id !== postId));
+      }
+    } catch (err) {
+      console.error('Error deleting post:', err);
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!selectedPost) return;
+    
+    try {
+      const commentIdNum = parseInt(commentId) || 0;
+      await db.forumComments.delete(commentIdNum);
+      setComments(prev => ({
+        ...prev,
+        [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== commentId) || []
+      }));
+    } catch (err) {
+      console.error('Error deleting comment:', err);
+    }
+  };
+
+  const handleRefresh = () => {
+    setLoading(true);
+    setError(null);
+    
+    // Reset and reload
+    if (unsubscribePostsRef.current) {
+      unsubscribePostsRef.current();
+      unsubscribePostsRef.current = null;
+    }
+    
+    // Trigger reload by updating a dependency
+    setPosts([]);
+    
+    setTimeout(() => {
+      if (isFirebaseConfigured()) {
+        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
+          const formattedPosts: Post[] = firebasePosts.map(p => ({
+            id: String(p.id),
+            userId: String(p.userId || ''),
+            userName: p.userName || 'Anonymous',
+            userLevel: p.userLevel || 'Student',
+            content: p.content || '',
+            timestamp: p.createdAt || Date.now(),
+            likes: p.likes || 0
+          }));
+          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
+          setPosts(formattedPosts);
+          setLoading(false);
+        });
+      } else {
+        loadFromIndexedDB();
+      }
+    }, 500);
+  };
+
+  const formatTime = (timestamp: number) => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${days}d ago`;
+  };
+
+  const isAdmin = currentUser?.email === 'ememzyvisuals@gmail.com';
+
+  if (!currentUser) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center p-4 ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
+        <div className="text-center">
+          <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Please login to access the forum</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen pb-24 ambient-bg">
-      <PageHeader title="Admin Dashboard" onOpenMenu={onOpenMenu} />
-
-      <div className="px-4 py-4 space-y-4">
-        {/* Refresh Button & Status */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-white/60 text-sm">
-            <Activity size={16} className="text-success animate-pulse" />
-            <span>Live Dashboard</span>
+    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
+      {/* Header */}
+      <div className={`sticky top-0 z-40 backdrop-blur-xl border-b ${isDark ? 'bg-black/80 border-white/10' : 'bg-white/80 border-gray-200'}`}>
+        <div className="flex items-center justify-between p-4">
+          <div className="flex items-center gap-3">
+            {selectedPost ? (
+              <button
+                onClick={() => setSelectedPost(null)}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+              >
+                <ArrowLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+              </button>
+            ) : (
+              <button
+                onClick={onOpenMenu}
+                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
+              >
+                <Menu className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
+              </button>
+            )}
+            <div>
+              <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                {selectedPost ? 'Discussion' : 'Community'}
+              </h1>
+              <div className="flex items-center gap-1 text-xs">
+                {connectionStatus === 'connecting' ? (
+                  <>
+                    <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
+                    <span className="text-yellow-400">Connecting...</span>
+                  </>
+                ) : connectionStatus === 'connected' ? (
+                  <>
+                    <Wifi className="w-3 h-3 text-green-400" />
+                    <span className="text-green-400">Live • All users synced</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="w-3 h-3 text-yellow-400" />
+                    <span className="text-yellow-400">Offline Mode</span>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
+          
           <button
-            onClick={loadData}
-            disabled={isRefreshing}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/10 text-white/70 text-sm hover:bg-white/20 transition-all"
+            onClick={handleRefresh}
+            disabled={loading}
+            className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
           >
-            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
-            {isRefreshing ? 'Refreshing...' : `Last: ${lastRefresh.toLocaleTimeString()}`}
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''} ${isDark ? 'text-white' : 'text-gray-900'}`} />
           </button>
         </div>
+      </div>
 
-        {/* Tabs */}
-        <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-          {[
-            { id: 'overview', label: 'Overview', icon: BarChart3 },
-            { id: 'questions', label: 'Questions', icon: FileText },
-            { id: 'analytics', label: 'Analytics', icon: TrendingUp },
-            { id: 'users', label: 'Users', icon: Users },
-            { id: 'posts', label: 'Forum', icon: MessageSquare },
-            { id: 'feedback', label: 'Feedback', icon: Star },
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all ${
-                activeTab === tab.id 
-                  ? 'bg-primary text-white' 
-                  : 'bg-white/5 text-white/60'
-              }`}
-            >
-              <tab.icon size={16} />
-              {tab.label}
-            </button>
-          ))}
+      {/* Error Message */}
+      {error && (
+        <div className="mx-4 mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl flex items-center gap-2">
+          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
+          <span className="text-red-400 text-sm">{error}</span>
         </div>
+      )}
 
-        <AnimatePresence mode="wait">
-          {/* Overview Tab */}
-          {activeTab === 'overview' && (
-            <motion.div
-              key="overview"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-4"
-            >
-              {/* Quick Stats Grid */}
-              <div className="grid grid-cols-2 gap-3">
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <Users size={20} className="text-primary" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.totalUsers}</p>
-                  <p className="text-xs text-white/60">Total Users</p>
-                  <p className="text-xs text-success mt-1">+{stats.newUsersToday} today</p>
-                </GlassCard>
+      {/* Loading State */}
+      {loading && (
+        <div className="flex flex-col items-center justify-center py-20">
+          <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-4" />
+          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Loading posts...</p>
+        </div>
+      )}
 
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <UserCheck size={20} className="text-success" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.activeToday}</p>
-                  <p className="text-xs text-white/60">Active Today</p>
-                  <p className="text-xs text-white/40 mt-1">{stats.newUsersThisWeek} this week</p>
-                </GlassCard>
-
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <Target size={20} className="text-accent" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.totalQuestions.toLocaleString()}</p>
-                  <p className="text-xs text-white/60">Questions Answered</p>
-                  <p className="text-xs text-success mt-1">{stats.avgAccuracy}% accuracy</p>
-                </GlassCard>
-
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <Upload size={20} className="text-cyan-400" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.totalUploadedQuestions}</p>
-                  <p className="text-xs text-white/60">Uploaded Questions</p>
-                  <p className="text-xs text-white/40 mt-1">Active in exams</p>
-                </GlassCard>
-
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <BookOpen size={20} className="text-orange-400" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.totalMockExams}</p>
-                  <p className="text-xs text-white/60">Mock Exams Taken</p>
-                  <p className="text-xs text-white/40 mt-1">{stats.totalStudyMinutes} mins</p>
-                </GlassCard>
-
-                <GlassCard className="text-center py-4" hover={false}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <Star size={20} className="text-yellow-400" />
-                  </div>
-                  <p className="text-2xl font-bold text-white">{stats.averageRating || '-'}</p>
-                  <p className="text-xs text-white/60">Avg Rating</p>
-                  <p className="text-xs text-white/40 mt-1">{stats.totalFeedback} reviews</p>
-                </GlassCard>
+      {/* Post Detail View */}
+      {!loading && selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Selected Post */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
+          >
+            <div className="flex items-start gap-3 mb-3">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                <User className="w-5 h-5 text-white" />
               </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedPost.userName}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
+                    {selectedPost.userLevel}
+                  </span>
+                </div>
+                <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                  <Clock className="w-3 h-3" />
+                  <span>{formatTime(selectedPost.timestamp)}</span>
+                </div>
+              </div>
+            </div>
+            <p className={`text-base leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{selectedPost.content}</p>
+            <div className={`flex items-center gap-4 mt-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+              <button
+                onClick={() => handleLike(selectedPost)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                  likedPosts.has(selectedPost.id)
+                    ? 'bg-red-500/20 text-red-400'
+                    : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                <Heart className={`w-4 h-4 ${likedPosts.has(selectedPost.id) ? 'fill-current' : ''}`} />
+                <span className="text-sm">{selectedPost.likes}</span>
+              </button>
+              <div className={`flex items-center gap-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
+                <MessageCircle className="w-4 h-4" />
+                <span className="text-sm">{comments[selectedPost.id]?.length || 0}</span>
+              </div>
+            </div>
+          </motion.div>
 
-              {/* User Distribution Pie Chart */}
-              {levelDistribution.length > 0 && (
-                <GlassCard hover={false}>
-                  <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                    Users by Academic Level
-                  </h3>
-                  <div className="h-48">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <PieChart>
-                        <Pie
-                          data={levelDistribution}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={40}
-                          outerRadius={70}
-                          paddingAngle={2}
-                          dataKey="value"
-                          label={({ name, value }) => `${name}: ${value}`}
-                        >
-                          {levelDistribution.map((_, index) => (
-                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip 
-                          contentStyle={{ 
-                            backgroundColor: 'rgba(0,0,0,0.8)', 
-                            border: 'none', 
-                            borderRadius: '8px',
-                            color: '#fff'
-                          }} 
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                  </div>
-                </GlassCard>
-              )}
-
-              {/* Top Performers */}
-              {topUsers.length > 0 && (
-                <GlassCard hover={false}>
-                  <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                    Top Performers
-                  </h3>
-                  <div className="space-y-3">
-                    {topUsers.map((user, index) => (
-                      <div key={user.id} className="flex items-center gap-3">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
-                          index === 0 ? 'bg-yellow-500 text-black' :
-                          index === 1 ? 'bg-gray-400 text-black' :
-                          index === 2 ? 'bg-orange-600 text-white' :
-                          'bg-white/20 text-white'
-                        }`}>
-                          {index + 1}
-                        </div>
-                        <div className="flex-1">
-                          <p className="font-medium text-white text-sm">{user.fullName}</p>
-                          <p className="text-xs text-white/60">{user.totalQuestionsAnswered} questions</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="font-bold text-success">{user.accuracy}%</p>
-                          <p className="text-xs text-white/40">{user.academicLevel}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </GlassCard>
-              )}
-            </motion.div>
-          )}
-
-          {/* Questions Tab */}
-          {activeTab === 'questions' && (
-            <motion.div
-              key="questions"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-4"
-            >
-              {/* Upload Mode Selector */}
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                {[
-                  { id: 'single', label: 'Single Question', icon: Plus },
-                  { id: 'json', label: 'Bulk Upload (JSON)', icon: FileJson },
-                ].map(mode => (
-                  <button
-                    key={mode.id}
-                    onClick={() => setUploadMode(mode.id as any)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap transition-all ${
-                      uploadMode === mode.id 
-                        ? 'bg-accent text-white' 
-                        : 'bg-white/5 text-white/60'
-                    }`}
+          {/* Comments */}
+          <div className="mb-6">
+            <h3 className={`text-lg font-semibold mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+              Comments ({comments[selectedPost.id]?.length || 0})
+            </h3>
+            
+            <div className="space-y-3">
+              <AnimatePresence>
+                {comments[selectedPost.id]?.map((comment, index) => (
+                  <motion.div
+                    key={comment.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 20 }}
+                    transition={{ delay: index * 0.05 }}
+                    className={`rounded-xl p-3 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-gray-50 border-gray-200'}`}
                   >
-                    <mode.icon size={16} />
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Upload Status */}
-              {uploadStatus && (
-                <GlassCard hover={false} className={uploadStatus.failed > 0 && uploadStatus.success === 0 ? 'border-error' : 'border-success'}>
-                  <div className="flex items-start gap-3">
-                    {uploadStatus.success > 0 && uploadStatus.failed === 0 ? (
-                      <CheckCircle className="text-success mt-0.5" size={20} />
-                    ) : uploadStatus.failed > 0 && uploadStatus.success === 0 ? (
-                      <XCircle className="text-error mt-0.5" size={20} />
-                    ) : (
-                      <AlertCircle className="text-yellow-400 mt-0.5" size={20} />
-                    )}
-                    <div className="flex-1">
-                      <p className="text-white font-medium">
-                        {uploadStatus.success > 0 && `${uploadStatus.success} question(s) uploaded successfully!`}
-                        {uploadStatus.failed > 0 && uploadStatus.success > 0 && ' '}
-                        {uploadStatus.failed > 0 && `${uploadStatus.failed} failed.`}
-                      </p>
-                      {uploadStatus.errors.length > 0 && (
-                        <ul className="text-sm text-error mt-2 space-y-1">
-                          {uploadStatus.errors.map((err, i) => (
-                            <li key={i}>{err}</li>
-                          ))}
-                        </ul>
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-green-500 to-teal-600 flex items-center justify-center">
+                          <User className="w-3.5 h-3.5 text-white" />
+                        </div>
+                        <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>{comment.userName}</span>
+                        <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{formatTime(comment.timestamp)}</span>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteComment(comment.id)}
+                          className={`p-1.5 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       )}
                     </div>
-                    <button onClick={() => setUploadStatus(null)} className="text-white/40">
-                      <XCircle size={16} />
-                    </button>
-                  </div>
-                </GlassCard>
+                    <p className={`text-sm pl-9 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{comment.content}</p>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+              
+              {(!comments[selectedPost.id] || comments[selectedPost.id].length === 0) && (
+                <div className="text-center py-8">
+                  <MessageCircle className={`w-12 h-12 mx-auto mb-3 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                  <p className={isDark ? 'text-gray-500' : 'text-gray-400'}>No comments yet. Be the first!</p>
+                </div>
               )}
+            </div>
+          </div>
 
-              {/* Single Question Form */}
-              {uploadMode === 'single' && (
-                <GlassCard hover={false}>
-                  <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                    Add Single Question
-                  </h3>
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-white/60 text-sm mb-1 block">Level</label>
-                        <select
-                          value={singleQuestion.level}
-                          onChange={e => setSingleQuestion({ ...singleQuestion, level: e.target.value as any })}
-                          className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-primary"
-                        >
-                          {LEVELS.map(l => <option key={l} value={l} className="bg-gray-900">{l}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-white/60 text-sm mb-1 block">Difficulty</label>
-                        <select
-                          value={singleQuestion.difficulty}
-                          onChange={e => setSingleQuestion({ ...singleQuestion, difficulty: e.target.value as any })}
-                          className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-primary"
-                        >
-                          {DIFFICULTIES.map(d => <option key={d} value={d} className="bg-gray-900">{d}</option>)}
-                        </select>
-                      </div>
-                    </div>
+          {/* Add Comment Input - Fixed at bottom */}
+          <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-xl border-t p-4 ${isDark ? 'bg-black/90 border-white/10' : 'bg-white/90 border-gray-200'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+            <div className="flex gap-3 max-w-lg mx-auto">
+              <input
+                type="text"
+                value={newComment}
+                onChange={(e) => setNewComment(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleAddComment()}
+                placeholder="Write a comment..."
+                className={`flex-1 border rounded-xl px-4 py-3 text-base focus:outline-none focus:border-blue-500 ${
+                  isDark 
+                    ? 'bg-white/10 border-white/20 text-white placeholder-gray-500' 
+                    : 'bg-gray-100 border-gray-200 text-gray-900 placeholder-gray-400'
+                }`}
+              />
+              <button
+                onClick={handleAddComment}
+                disabled={!newComment.trim() || submitting}
+                className="w-12 h-12 rounded-xl bg-blue-500 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {submitting ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Send className="w-5 h-5 text-white" />
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-white/60 text-sm mb-1 block">Subject</label>
-                        <select
-                          value={singleQuestion.subject}
-                          onChange={e => setSingleQuestion({ ...singleQuestion, subject: e.target.value })}
-                          className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-primary"
-                        >
-                          <option value="" className="bg-gray-900">Select Subject</option>
-                          {SUBJECTS_BY_LEVEL[singleQuestion.level].map(s => (
-                            <option key={s} value={s} className="bg-gray-900">{s}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <Input
-                        label="Topic"
-                        value={singleQuestion.topic}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, topic: e.target.value })}
-                        placeholder="e.g., Algebra"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-white/60 text-sm mb-1 block">Question Text</label>
-                      <textarea
-                        value={singleQuestion.text}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, text: e.target.value })}
-                        placeholder="Enter the question..."
-                        rows={3}
-                        className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-white/40 focus:outline-none focus:border-primary resize-none"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <Input
-                        label="Option A"
-                        value={singleQuestion.optionA}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, optionA: e.target.value })}
-                        placeholder="Option A"
-                      />
-                      <Input
-                        label="Option B"
-                        value={singleQuestion.optionB}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, optionB: e.target.value })}
-                        placeholder="Option B"
-                      />
-                      <Input
-                        label="Option C"
-                        value={singleQuestion.optionC}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, optionC: e.target.value })}
-                        placeholder="Option C"
-                      />
-                      <Input
-                        label="Option D"
-                        value={singleQuestion.optionD}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, optionD: e.target.value })}
-                        placeholder="Option D"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-white/60 text-sm mb-1 block">Correct Answer</label>
-                        <select
-                          value={singleQuestion.correctAnswer}
-                          onChange={e => setSingleQuestion({ ...singleQuestion, correctAnswer: e.target.value as any })}
-                          className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white focus:outline-none focus:border-primary"
-                        >
-                          <option value="A" className="bg-gray-900">A</option>
-                          <option value="B" className="bg-gray-900">B</option>
-                          <option value="C" className="bg-gray-900">C</option>
-                          <option value="D" className="bg-gray-900">D</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-white/60 text-sm mb-1 block">Explanation (Optional)</label>
-                      <textarea
-                        value={singleQuestion.explanation}
-                        onChange={e => setSingleQuestion({ ...singleQuestion, explanation: e.target.value })}
-                        placeholder="Explain why this is the correct answer..."
-                        rows={2}
-                        className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-white/40 focus:outline-none focus:border-primary resize-none"
-                      />
-                    </div>
-
-                    <Button onClick={handleAddSingleQuestion} fullWidth icon={<Plus size={18} />}>
-                      Add Question
-                    </Button>
-                  </div>
-                </GlassCard>
-              )}
-
-              {/* JSON Upload */}
-              {uploadMode === 'json' && (
-                <GlassCard hover={false}>
-                  <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                    Bulk Upload (JSON)
-                  </h3>
-                  
-                  <div className="flex gap-2 mb-4">
-                    <Button 
-                      variant="secondary" 
-                      onClick={downloadSampleJson}
-                      icon={<Download size={16} />}
-                    >
-                      Download Sample
-                    </Button>
-                    <input
-                      type="file"
-                      accept=".json"
-                      ref={fileInputRef}
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                    <Button 
-                      variant="secondary" 
-                      onClick={() => fileInputRef.current?.click()}
-                      icon={<Upload size={16} />}
-                    >
-                      Upload File
-                    </Button>
-                  </div>
-
-                  <div className="mb-4">
-                    <label className="text-white/60 text-sm mb-2 block">JSON Format:</label>
-                    <pre className="text-xs text-white/40 bg-black/30 p-3 rounded-lg overflow-x-auto">
-{`[
-  {
-    "text": "Question text here",
-    "options": ["A", "B", "C", "D"],
-    "correctAnswer": "A",
-    "explanation": "Why A is correct",
-    "subject": "Mathematics",
-    "topic": "Algebra",
-    "difficulty": "Easy|Medium|Hard",
-    "level": "JSS|SSS|JAMB|University"
-  }
-]`}
-                    </pre>
-                  </div>
-
-                  <div>
-                    <label className="text-white/60 text-sm mb-1 block">Paste JSON Array</label>
-                    <textarea
-                      value={jsonInput}
-                      onChange={e => setJsonInput(e.target.value)}
-                      placeholder="Paste your JSON array of questions here..."
-                      rows={10}
-                      className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-white/40 focus:outline-none focus:border-primary resize-none font-mono text-sm"
-                    />
-                  </div>
-
-                  <Button 
-                    onClick={handleJsonUpload} 
-                    fullWidth 
-                    className="mt-4"
-                    icon={<Upload size={18} />}
-                    disabled={!jsonInput.trim()}
-                  >
-                    Upload Questions
-                  </Button>
-                </GlassCard>
-              )}
-
-              {/* Uploaded Questions List */}
-              <GlassCard hover={false}>
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-bold text-white" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                    Uploaded Questions ({uploadedQuestions.length})
-                  </h3>
-                </div>
-
-                {/* Filters */}
-                <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
-                  <div className="relative flex-shrink-0">
-                    <select
-                      value={questionFilter.level}
-                      onChange={e => setQuestionFilter({ ...questionFilter, level: e.target.value })}
-                      className="px-3 py-2 pr-8 rounded-lg bg-white/5 border border-white/10 text-white text-sm focus:outline-none appearance-none"
-                    >
-                      <option value="" className="bg-gray-900">All Levels</option>
-                      {LEVELS.map(l => <option key={l} value={l} className="bg-gray-900">{l}</option>)}
-                    </select>
-                    <ChevronDown size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none" />
-                  </div>
-                  <div className="relative flex-1 min-w-[150px]">
-                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
-                    <input
-                      type="text"
-                      placeholder="Search questions..."
-                      value={questionFilter.search}
-                      onChange={e => setQuestionFilter({ ...questionFilter, search: e.target.value })}
-                      className="w-full pl-9 pr-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-sm placeholder-white/40 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Questions List */}
-                <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                  {filteredQuestions.length === 0 ? (
-                    <div className="text-center py-8 text-white/40">
-                      <FileText size={40} className="mx-auto mb-2 opacity-50" />
-                      <p>No questions uploaded yet</p>
-                    </div>
-                  ) : (
-                    filteredQuestions.map(q => (
-                      <div 
-                        key={q.id} 
-                        className={`p-3 rounded-lg bg-white/5 border ${q.isActive ? 'border-white/10' : 'border-error/30 opacity-60'}`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-white text-sm line-clamp-2">{q.text}</p>
-                            <div className="flex flex-wrap gap-1 mt-2">
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-primary/20 text-primary">{q.level}</span>
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-white/60">{q.subject}</span>
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-white/60">{q.topic}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded-full ${
-                                q.difficulty === 'Easy' ? 'bg-success/20 text-success' :
-                                q.difficulty === 'Medium' ? 'bg-yellow-500/20 text-yellow-400' :
-                                'bg-error/20 text-error'
-                              }`}>{q.difficulty}</span>
-                            </div>
-                          </div>
-                          <div className="flex gap-1 flex-shrink-0">
-                            <button
-                              onClick={() => q.id && handleToggleQuestionStatus(q.id, q.isActive)}
-                              className={`p-2 rounded-lg transition-colors ${
-                                q.isActive 
-                                  ? 'bg-success/20 text-success hover:bg-success/30' 
-                                  : 'bg-white/10 text-white/40 hover:bg-white/20'
-                              }`}
-                              title={q.isActive ? 'Deactivate' : 'Activate'}
-                            >
-                              {q.isActive ? <CheckCircle size={16} /> : <XCircle size={16} />}
-                            </button>
-                            <button
-                              onClick={() => q.id && handleDeleteQuestion(q.id)}
-                              className="p-2 rounded-lg bg-error/20 text-error hover:bg-error/30 transition-colors"
-                              title="Delete"
-                            >
-                              <Trash2 size={16} />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </GlassCard>
-            </motion.div>
-          )}
-
-          {/* Analytics Tab */}
-          {activeTab === 'analytics' && (
-            <motion.div
-              key="analytics"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-4"
-            >
-              <GlassCard hover={false}>
-                <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  Daily Activity (Last 7 Days)
-                </h3>
-                <div className="h-48">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={dailyActivity}>
-                      <defs>
-                        <linearGradient id="colorExams" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#007AFF" stopOpacity={0.8}/>
-                          <stop offset="95%" stopColor="#007AFF" stopOpacity={0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                      <XAxis dataKey="day" stroke="rgba(255,255,255,0.5)" fontSize={12} />
-                      <YAxis stroke="rgba(255,255,255,0.5)" fontSize={12} />
-                      <Tooltip 
-                        contentStyle={{ 
-                          backgroundColor: 'rgba(0,0,0,0.8)', 
-                          border: 'none', 
-                          borderRadius: '8px',
-                          color: '#fff'
-                        }} 
-                      />
-                      <Area type="monotone" dataKey="exams" stroke="#007AFF" fillOpacity={1} fill="url(#colorExams)" name="Mock Exams" />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </GlassCard>
-
-              <GlassCard hover={false}>
-                <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  Performance by Level
-                </h3>
-                <div className="h-48">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={performanceByLevel}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                      <XAxis dataKey="level" stroke="rgba(255,255,255,0.5)" fontSize={12} />
-                      <YAxis stroke="rgba(255,255,255,0.5)" fontSize={12} />
-                      <Tooltip 
-                        contentStyle={{ 
-                          backgroundColor: 'rgba(0,0,0,0.8)', 
-                          border: 'none', 
-                          borderRadius: '8px',
-                          color: '#fff'
-                        }} 
-                      />
-                      <Legend />
-                      <Bar dataKey="accuracy" fill="#34C759" name="Accuracy %" radius={[4, 4, 0, 0]} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </GlassCard>
-
-              <GlassCard hover={false}>
-                <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  Level Breakdown
-                </h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-white/60 border-b border-white/10">
-                        <th className="text-left py-2">Level</th>
-                        <th className="text-center py-2">Users</th>
-                        <th className="text-center py-2">Questions</th>
-                        <th className="text-right py-2">Accuracy</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {performanceByLevel.map(level => (
-                        <tr key={level.level} className="text-white border-b border-white/5">
-                          <td className="py-2 font-medium">{level.level}</td>
-                          <td className="text-center py-2">{level.users}</td>
-                          <td className="text-center py-2">{level.questions}</td>
-                          <td className="text-right py-2">
-                            <span className={`px-2 py-0.5 rounded-full text-xs ${
-                              level.accuracy >= 70 ? 'bg-success/20 text-success' :
-                              level.accuracy >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
-                              'bg-error/20 text-error'
-                            }`}>
-                              {level.accuracy}%
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </GlassCard>
-
-              <GlassCard hover={false}>
-                <h3 className="font-bold text-white mb-4" style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  Platform Health
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-white">User Engagement</span>
-                      <span className="text-white/60">{stats.totalUsers > 0 ? Math.round((stats.activeToday / stats.totalUsers) * 100) : 0}%</span>
-                    </div>
-                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${stats.totalUsers > 0 ? (stats.activeToday / stats.totalUsers) * 100 : 0}%` }}
-                        className="h-full bg-gradient-to-r from-primary to-accent rounded-full"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-white">Content Quality</span>
-                      <span className="text-white/60">{stats.avgAccuracy}%</span>
-                    </div>
-                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${stats.avgAccuracy}%` }}
-                        className="h-full bg-gradient-to-r from-success to-emerald-400 rounded-full"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-white">User Satisfaction</span>
-                      <span className="text-white/60">{Math.round((stats.averageRating / 5) * 100)}%</span>
-                    </div>
-                    <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${(stats.averageRating / 5) * 100}%` }}
-                        className="h-full bg-gradient-to-r from-yellow-400 to-orange-400 rounded-full"
-                      />
-                    </div>
-                  </div>
-                </div>
-              </GlassCard>
-            </motion.div>
-          )}
-
-          {/* Users Tab */}
-          {activeTab === 'users' && (
-            <motion.div
-              key="users"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-3"
-            >
-              <div className="flex items-center justify-between">
-                <p className="text-white/60 text-sm">{users.length} registered users</p>
-                <button className="flex items-center gap-1 text-white/40 text-sm">
-                  <Filter size={14} />
-                  Filter
-                </button>
+      {/* Posts List View */}
+      {!loading && !selectedPost && (
+        <div className="p-4 pb-32">
+          {/* Connection Info Banner */}
+          {connectionStatus === 'offline' && (
+            <div className={`mb-4 p-3 rounded-xl flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-yellow-50 border border-yellow-200'}`}>
+              <WifiOff className="w-5 h-5 text-yellow-500 flex-shrink-0" />
+              <div className="flex-1">
+                <p className={`text-sm font-medium ${isDark ? 'text-yellow-400' : 'text-yellow-700'}`}>Offline Mode</p>
+                <p className={`text-xs ${isDark ? 'text-yellow-500/70' : 'text-yellow-600'}`}>
+                  Posts are saved locally. Add Firebase config to sync with all users.
+                </p>
               </div>
-              {users.map(user => (
-                <GlassCard key={user.id} hover={false}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <p className="font-medium text-white">{user.fullName}</p>
-                        {user.streak >= 7 && (
-                          <Zap size={14} className="text-yellow-400" />
-                        )}
-                      </div>
-                      <p className="text-sm text-white/60">{user.email}</p>
-                      <div className="flex items-center gap-2 mt-2 flex-wrap">
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-primary/20 text-primary">
-                          {user.academicLevel}
-                        </span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-white/60">
-                          {user.totalQuestionsAnswered} Qs
-                        </span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${
-                          user.accuracy >= 70 ? 'bg-success/20 text-success' :
-                          user.accuracy >= 50 ? 'bg-yellow-500/20 text-yellow-400' :
-                          'bg-error/20 text-error'
-                        }`}>
-                          {user.accuracy}% accuracy
-                        </span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="flex items-center gap-1 text-orange-400">
-                        <Zap size={14} />
-                        <span className="text-sm font-medium">{user.streak}</span>
-                      </div>
-                      <p className="text-xs text-white/40 mt-1">
-                        {new Date(user.createdAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
-                </GlassCard>
-              ))}
-              {users.length === 0 && (
-                <div className="text-center py-12 text-white/40">
-                  <Users size={48} className="mx-auto mb-4 opacity-50" />
-                  <p>No users registered yet</p>
-                </div>
-              )}
-            </motion.div>
+            </div>
           )}
 
-          {/* Posts Tab */}
-          {activeTab === 'posts' && (
-            <motion.div
-              key="posts"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-3"
-            >
-              <p className="text-white/60 text-sm">{posts.length} forum posts</p>
-              {posts.map(post => (
-                <GlassCard key={post.id} hover={false}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-medium text-white">{post.userName}</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-white/60">
+          {/* Create Post */}
+          <div className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}>
+            <textarea
+              value={newPost}
+              onChange={(e) => setNewPost(e.target.value)}
+              placeholder="Share something with the community..."
+              rows={3}
+              className={`w-full bg-transparent resize-none focus:outline-none text-base ${
+                isDark ? 'text-white placeholder-gray-500' : 'text-gray-900 placeholder-gray-400'
+              }`}
+            />
+            <div className="flex justify-between items-center mt-3">
+              <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                {newPost.length}/500
+              </span>
+              <button
+                onClick={handleCreatePost}
+                disabled={!newPost.trim() || submitting || newPost.length > 500}
+                className="px-5 py-2.5 rounded-xl bg-blue-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {submitting ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Post
+              </button>
+            </div>
+          </div>
+
+          {/* Posts */}
+          <div className="space-y-4">
+            <AnimatePresence>
+              {posts.map((post, index) => (
+                <motion.div
+                  key={post.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  transition={{ delay: index * 0.03 }}
+                  className={`backdrop-blur-xl rounded-2xl p-4 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
+                >
+                  <div className="flex items-start gap-3 mb-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
+                      <User className="w-5 h-5 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{post.userName}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
                           {post.userLevel}
                         </span>
                       </div>
-                      <p className="text-sm text-white/70 line-clamp-3">{post.content}</p>
-                      <div className="flex items-center gap-4 mt-2 text-xs text-white/40">
-                        <span>{new Date(post.timestamp).toLocaleString()}</span>
-                        <span>{post.likes} likes</span>
+                      <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
+                        <Clock className="w-3 h-3" />
+                        <span>{formatTime(post.timestamp)}</span>
                       </div>
                     </div>
+                    {isAdmin && (
+                      <button
+                        onClick={() => handleDeletePost(post.id)}
+                        className={`p-2 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  
+                  <p className={`text-base leading-relaxed mb-4 ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{post.content}</p>
+                  
+                  <div className={`flex items-center gap-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
                     <button
-                      onClick={() => post.id && handleDeletePost(post.id)}
-                      className="p-2 rounded-lg bg-error/20 text-error hover:bg-error/30 transition-colors"
+                      onClick={() => handleLike(post)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
+                        likedPosts.has(post.id)
+                          ? 'bg-red-500/20 text-red-400'
+                          : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
+                      }`}
                     >
-                      <Trash2 size={16} />
+                      <Heart className={`w-4 h-4 ${likedPosts.has(post.id) ? 'fill-current' : ''}`} />
+                      <span className="text-sm">{post.likes}</span>
+                    </button>
+                    <button
+                      onClick={() => setSelectedPost(post)}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'}`}
+                    >
+                      <MessageCircle className="w-4 h-4" />
+                      <span className="text-sm">Comment</span>
                     </button>
                   </div>
-                </GlassCard>
+                </motion.div>
               ))}
-              {posts.length === 0 && (
-                <div className="text-center py-12 text-white/40">
-                  <MessageSquare size={48} className="mx-auto mb-4 opacity-50" />
-                  <p>No forum posts yet</p>
-                </div>
-              )}
-            </motion.div>
-          )}
+            </AnimatePresence>
 
-          {/* Feedback Tab */}
-          {activeTab === 'feedback' && (
-            <motion.div
-              key="feedback"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="space-y-3"
-            >
-              <div className="flex items-center justify-between mb-4">
-                <p className="text-white/60 text-sm">{feedback.length} reviews received</p>
-                <div className="flex items-center gap-2">
-                  <Star size={16} className="text-yellow-400 fill-yellow-400" />
-                  <span className="text-white font-bold">{stats.averageRating}</span>
-                  <span className="text-white/40">/ 5</span>
-                </div>
+            {posts.length === 0 && (
+              <div className="text-center py-12">
+                <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
+                <h3 className={`text-xl font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  No posts yet
+                </h3>
+                <p className={isDark ? 'text-gray-400' : 'text-gray-500'}>Be the first to start a discussion!</p>
               </div>
-
-              <GlassCard hover={false}>
-                <h4 className="font-medium text-white mb-3">Rating Distribution</h4>
-                <div className="space-y-2">
-                  {[5, 4, 3, 2, 1].map(rating => {
-                    const count = feedback.filter(f => f.rating === rating).length;
-                    const percentage = feedback.length > 0 ? (count / feedback.length) * 100 : 0;
-                    return (
-                      <div key={rating} className="flex items-center gap-2">
-                        <div className="flex items-center gap-1 w-12">
-                          <span className="text-sm text-white">{rating}</span>
-                          <Star size={12} className="text-yellow-400 fill-yellow-400" />
-                        </div>
-                        <div className="flex-1 h-2 bg-white/10 rounded-full overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{ width: `${percentage}%` }}
-                            className="h-full bg-yellow-400 rounded-full"
-                          />
-                        </div>
-                        <span className="text-xs text-white/60 w-8 text-right">{count}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </GlassCard>
-
-              {feedback.map(review => (
-                <GlassCard key={review.id} hover={false}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="font-medium text-white">{review.userName}</span>
-                        <div className="flex items-center gap-0.5">
-                          {[1, 2, 3, 4, 5].map(star => (
-                            <Star
-                              key={star}
-                              size={12}
-                              className={star <= review.rating ? 'text-yellow-400 fill-yellow-400' : 'text-white/20'}
-                            />
-                          ))}
-                        </div>
-                      </div>
-                      {review.review && (
-                        <p className="text-sm text-white/70">{review.review}</p>
-                      )}
-                      <p className="text-xs text-white/40 mt-2">
-                        {new Date(review.timestamp).toLocaleString()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => review.id && handleDeleteFeedback(review.id)}
-                      className="p-2 rounded-lg bg-error/20 text-error hover:bg-error/30 transition-colors"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </GlassCard>
-              ))}
-
-              {feedback.length === 0 && (
-                <div className="text-center py-12 text-white/40">
-                  <Star size={48} className="mx-auto mb-4 opacity-50" />
-                  <p>No feedback received yet</p>
-                </div>
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+export default ForumPage;
