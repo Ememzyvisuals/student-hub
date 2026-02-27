@@ -1,871 +1,936 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  MessageSquare,
-  Heart,
-  Send,
-  ArrowLeft,
+import { 
+  Clock, 
+  CheckCircle, 
+  XCircle, 
+  AlertTriangle,
+  Play,
+  Flag,
+  BarChart3,
+  TrendingUp,
+  ArrowRight,
+  BookOpen,
+  Brain,
+  Award,
+  Zap,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  Lightbulb,
   Menu,
-  Wifi,
-  WifiOff,
-  Loader2,
-  User,
-  Clock,
-  MessageCircle,
-  Trash2,
-  AlertCircle,
-  RefreshCw
+  Calculator,
+  Wifi
 } from 'lucide-react';
-import { useStore } from '../store/useStore';
-import { db } from '../lib/db';
-import {
-  subscribeToPosts,
-  subscribeToComments,
-  createPost,
-  addComment,
-  toggleLikePost,
-  isFirebaseConfigured,
-  deletePost as firebaseDeletePost,
-  subscribeToUserLikes
-} from '../lib/firebase';
+import { GlassCard } from '@/components/ui/GlassCard';
+import { Button } from '@/components/ui/Button';
+import { Select } from '@/components/ui/Input';
+import { useStore } from '@/store/useStore';
+import { db } from '@/lib/db';
+import { getSubjects, getAllQuestionsWithUploaded, Question } from '@/data/questionBank';
+import { isFirebaseConfigured, subscribeToUploadedQuestions } from '@/lib/firebase';
 
-interface ForumPageProps {
+type ExamView = 'setup' | 'exam' | 'result';
+
+// JAMB Scoring System: Each subject has 60 questions worth 100 marks
+// Total: 400 marks (4 subjects × 100 marks each)
+// Actual formula: (Correct Answers / Total Questions) × 400
+
+interface SubjectAnalysis {
+  subject: string;
+  correct: number;
+  total: number;
+  percentage: number;
+  jambScore: number;
+  grade: string;
+  status: 'excellent' | 'good' | 'average' | 'poor' | 'fail';
+  weakTopics: string[];
+  recommendations: string[];
+}
+
+interface ExamAnalysis {
+  overallScore: number;
+  jambScore: number;
+  percentile: number;
+  grade: string;
+  status: string;
+  timeEfficiency: number;
+  subjects: SubjectAnalysis[];
+  strengths: string[];
+  weaknesses: string[];
+  recommendations: string[];
+  predictedRange: { min: number; max: number };
+  universityChances: { tier: string; chance: string }[];
+}
+
+interface MockExamPageProps {
   onOpenMenu?: () => void;
 }
 
-interface Post {
-  id: string;
-  odId?: number;
-  userId: string;
-  userName: string;
-  userLevel: string;
-  content: string;
-  timestamp: number;
-  likes: number;
-}
-
-interface Comment {
-  id: string;
-  postId: string;
-  userId: string;
-  userName: string;
-  content: string;
-  timestamp: number;
-}
-
-export function ForumPage({ onOpenMenu }: ForumPageProps) {
-  const { currentUser, theme } = useStore();
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [comments, setComments] = useState<Record<string, Comment[]>>({});
-  const [newPost, setNewPost] = useState('');
-  const [newComment, setNewComment] = useState('');
-  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
-  const [loading, setLoading] = useState(true);
-  // isOnline is now replaced by connectionStatus
-  const [likedPosts, setLikedPosts] = useState<Set<string>>(new Set());
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'offline'>('connecting');
+export function MockExamPage({ onOpenMenu }: MockExamPageProps) {
+  const { currentUser, updateUserStats, theme, incrementMockExams, mockExamsTaken } = useStore();
+  const level = currentUser?.academicLevel || 'JAMB';
   
-  const unsubscribePostsRef = useRef<(() => void) | null>(null);
-  const unsubscribeCommentsRef = useRef<(() => void) | null>(null);
-  const unsubscribeLikesRef = useRef<(() => void) | null>(null);
+  // Track if this is the first mock exam to trigger rating popup
+  const isFirstMockExam = mockExamsTaken === 0;
 
+  const [view, setView] = useState<ExamView>('setup');
+  const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
+  const [duration, setDuration] = useState(60);
+  const [questionCount, setQuestionCount] = useState(40);
+  
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [markedForReview, setMarkedForReview] = useState<Set<number>>(new Set());
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [showQuestionNav, setShowQuestionNav] = useState(false);
+  const [showDetailedAnalysis, setShowDetailedAnalysis] = useState(false);
+  const [showCalculator, setShowCalculator] = useState(false);
+  const [calcValue, setCalcValue] = useState('0');
+  const [calcHistory, setCalcHistory] = useState<string[]>([]);
+
+  const subjects = getSubjects(level);
   const isDark = theme === 'dark';
-
-  // Load posts
+  const textColor = isDark ? 'text-white' : 'text-gray-900';
+  const textMuted = isDark ? 'text-white/60' : 'text-gray-600';
+  const bgCard = isDark ? '' : 'bg-white';
+  const useFirebase = isFirebaseConfigured();
+  
+  // Real-time uploaded questions count
+  const [uploadedQuestionsCount, setUploadedQuestionsCount] = useState(0);
+  
   useEffect(() => {
-    if (!currentUser) {
-      setLoading(false);
-      return;
-    }
-
-    console.log('🔄 Initializing forum...');
-    setLoading(true);
-    setError(null);
-    setConnectionStatus('connecting');
-
-    // Cleanup previous subscriptions
-    if (unsubscribePostsRef.current) {
-      unsubscribePostsRef.current();
-      unsubscribePostsRef.current = null;
-    }
-
-    const firebaseConfigured = isFirebaseConfigured();
-    console.log('📡 Firebase configured:', firebaseConfigured);
-
-    if (firebaseConfigured) {
-      // Firebase is configured
-      
-      // Set a timeout for slow connections
-      const timeoutId = setTimeout(() => {
-        if (loading) {
-          console.log('⏱️ Connection timeout - showing offline mode');
-          setConnectionStatus('offline');
-          setLoading(false);
-          loadFromIndexedDB();
-        }
-      }, 10000);
-
-      // Subscribe to posts from Firebase
-      try {
-        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
-          clearTimeout(timeoutId);
-          console.log('📥 Received posts from Firebase:', firebasePosts.length);
-          
-          const formattedPosts: Post[] = firebasePosts.map(p => ({
-            id: String(p.id),
-            userId: String(p.userId || ''),
-            userName: p.userName || 'Anonymous',
-            userLevel: p.userLevel || 'Student',
-            content: p.content || '',
-            timestamp: p.createdAt || Date.now(),
-            likes: p.likes || 0
-          }));
-          
-          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
-          setPosts(formattedPosts);
-          setLoading(false);
-          setConnectionStatus('connected');
-        });
-
-        // Subscribe to user likes
-        unsubscribeLikesRef.current = subscribeToUserLikes(String(currentUser.id), (likedIds) => {
-          console.log('❤️ User liked posts:', likedIds.size);
-          setLikedPosts(likedIds);
-        });
-
-      } catch (err) {
-        console.error('❌ Firebase subscription error:', err);
-        clearTimeout(timeoutId);
-        setError('Failed to connect to server');
-        setConnectionStatus('offline');
-        setLoading(false);
-        loadFromIndexedDB();
-      }
-
-      return () => {
-        clearTimeout(timeoutId);
-      };
-
-    } else {
-      // Offline mode - use IndexedDB
-      setConnectionStatus('offline');
-      loadFromIndexedDB();
-    }
-
-    return () => {
-      if (unsubscribePostsRef.current) {
-        unsubscribePostsRef.current();
-        unsubscribePostsRef.current = null;
-      }
-      if (unsubscribeLikesRef.current) {
-        unsubscribeLikesRef.current();
-        unsubscribeLikesRef.current = null;
-      }
-    };
-  }, [currentUser?.id]);
-
-  const loadFromIndexedDB = async () => {
-    try {
-      console.log('📂 Loading posts from IndexedDB...');
-      const localPosts = await db.forumPosts.orderBy('timestamp').reverse().toArray();
-      
-      const formattedPosts: Post[] = localPosts.map(p => ({
-        id: String(p.id),
-        odId: p.id,
-        userId: String(p.userId),
-        userName: p.userName || 'Anonymous',
-        userLevel: p.userLevel || 'Student',
-        content: p.content,
-        timestamp: p.timestamp ? new Date(p.timestamp).getTime() : Date.now(),
-        likes: p.likes || 0
-      }));
-      
-      setPosts(formattedPosts);
-      console.log('📂 Loaded', formattedPosts.length, 'posts from IndexedDB');
-
-      // Load liked posts from IndexedDB
-      if (currentUser) {
-        const userIdNum = typeof currentUser.id === 'number' 
-          ? currentUser.id 
-          : parseInt(String(currentUser.id)) || 0;
-        const localLikes = await db.postLikes.where('userId').equals(userIdNum).toArray();
-        setLikedPosts(new Set(localLikes.map(l => String(l.postId))));
-      }
-    } catch (err) {
-      console.error('❌ IndexedDB error:', err);
-      setError('Failed to load posts');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Load comments for selected post
-  useEffect(() => {
-    if (!selectedPost) return;
-
-    console.log('💬 Loading comments for post:', selectedPost.id);
-
-    if (unsubscribeCommentsRef.current) {
-      unsubscribeCommentsRef.current();
-      unsubscribeCommentsRef.current = null;
-    }
-
-    if (isFirebaseConfigured()) {
-      unsubscribeCommentsRef.current = subscribeToComments(selectedPost.id, (firebaseComments) => {
-        console.log('💬 Received comments:', firebaseComments.length);
-        
-        const formattedComments: Comment[] = firebaseComments.map(c => ({
-          id: String(c.id),
-          postId: String(c.postId || selectedPost.id),
-          userId: String(c.userId || ''),
-          userName: c.userName || 'Anonymous',
-          content: c.content || '',
-          timestamp: c.createdAt || Date.now()
-        }));
-        
-        formattedComments.sort((a, b) => a.timestamp - b.timestamp);
-        
-        setComments(prev => ({
-          ...prev,
-          [selectedPost.id]: formattedComments
-        }));
-      });
-    } else {
-      // Load from IndexedDB
-      loadCommentsFromIndexedDB(selectedPost);
-    }
-
-    return () => {
-      if (unsubscribeCommentsRef.current) {
-        unsubscribeCommentsRef.current();
-        unsubscribeCommentsRef.current = null;
-      }
-    };
-  }, [selectedPost?.id]);
-
-  const loadCommentsFromIndexedDB = async (post: Post) => {
-    try {
-      const postIdNum = post.odId || parseInt(post.id) || 0;
-      const localComments = await db.forumComments
-        .where('postId')
-        .equals(postIdNum)
-        .toArray();
-      
-      const formattedComments: Comment[] = localComments.map(c => ({
-        id: String(c.id),
-        postId: String(c.postId),
-        userId: String(c.userId),
-        userName: c.userName || 'User',
-        content: c.content,
-        timestamp: c.timestamp ? new Date(c.timestamp).getTime() : Date.now()
-      }));
-      
-      setComments(prev => ({
-        ...prev,
-        [post.id]: formattedComments
-      }));
-    } catch (err) {
-      console.error('Error loading comments:', err);
-    }
-  };
-
-  const handleCreatePost = useCallback(async () => {
-    if (!newPost.trim() || !currentUser || submitting) return;
-
-    setSubmitting(true);
-    setError(null);
-    const postContent = newPost.trim();
+    if (!useFirebase) return;
     
-    console.log('📝 Creating post...');
+    // Subscribe to real-time uploaded questions count
+    const unsubscribe = subscribeToUploadedQuestions((questions) => {
+      const filtered = questions.filter(
+        (q: any) => q.level === level && q.isActive !== false
+      );
+      setUploadedQuestionsCount(filtered.length);
+    });
+    
+    return () => unsubscribe();
+  }, [level, useFirebase]);
 
-    try {
-      if (isFirebaseConfigured()) {
-        // Create in Firebase - the subscription will update the UI
-        const postId = await createPost(
-          String(currentUser.id),
-          currentUser.fullName,
-          currentUser.academicLevel,
-          postContent
-        );
-        
-        console.log('✅ Post created in Firebase:', postId);
-        setNewPost('');
-        
-      } else {
-        // Create in IndexedDB
-        const userIdNum = typeof currentUser.id === 'number' 
-          ? currentUser.id 
-          : parseInt(String(currentUser.id)) || Date.now();
-          
-        const localPostId = await db.forumPosts.add({
-          userId: userIdNum,
-          userName: currentUser.fullName,
-          userLevel: currentUser.academicLevel,
-          content: postContent,
-          timestamp: new Date(),
-          likes: 0
-        });
-        
-        console.log('✅ Post created in IndexedDB:', localPostId);
-        
-        // Add to local state immediately
-        const newPostObj: Post = {
-          id: String(localPostId),
-          odId: localPostId as number,
-          userId: String(userIdNum),
-          userName: currentUser.fullName,
-          userLevel: currentUser.academicLevel,
-          content: postContent,
-          timestamp: Date.now(),
-          likes: 0
-        };
-        setPosts(prev => [newPostObj, ...prev]);
-        setNewPost('');
+  const handleCalcButton = (val: string) => {
+    if (val === 'C') {
+      setCalcValue('0');
+    } else if (val === 'CE') {
+      setCalcValue('0');
+      setCalcHistory([]);
+    } else if (val === '⌫') {
+      setCalcValue(prev => prev.length > 1 ? prev.slice(0, -1) : '0');
+    } else if (val === '=') {
+      try {
+        const expression = calcValue
+          .replace(/×/g, '*')
+          .replace(/÷/g, '/')
+          .replace(/√/g, 'Math.sqrt')
+          .replace(/π/g, 'Math.PI')
+          .replace(/\^/g, '**');
+        const result = Function('"use strict"; return (' + expression + ')')();
+        const resultStr = String(Number(result.toFixed(10)));
+        setCalcHistory(prev => [...prev.slice(-4), `${calcValue} = ${resultStr}`]);
+        setCalcValue(resultStr);
+      } catch {
+        setCalcValue('Error');
       }
-    } catch (err) {
-      console.error('❌ Error creating post:', err);
-      setError('Failed to create post. Please try again.');
-    } finally {
-      setSubmitting(false);
+    } else if (val === '±') {
+      setCalcValue(prev => prev.startsWith('-') ? prev.slice(1) : '-' + prev);
+    } else if (val === '%') {
+      try {
+        const result = parseFloat(calcValue) / 100;
+        setCalcValue(String(result));
+      } catch {
+        setCalcValue('Error');
+      }
+    } else {
+      setCalcValue(prev => prev === '0' || prev === 'Error' ? val : prev + val);
     }
-  }, [newPost, currentUser, submitting]);
+  };
 
-  const handleLike = useCallback(async (post: Post) => {
-    if (!currentUser) return;
+  // Timer effect
+  useEffect(() => {
+    if (view !== 'exam' || timeLeft <= 0) return;
 
-    const userId = String(currentUser.id);
-    const isLiked = likedPosts.has(post.id);
+    const timer = setInterval(() => {
+      setTimeLeft(prev => {
+        if (prev <= 1) {
+          handleSubmit();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
 
-    // Optimistic update
-    setLikedPosts(prev => {
+    return () => clearInterval(timer);
+  }, [view, timeLeft]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const toggleSubject = (subject: string) => {
+    setSelectedSubjects(prev => 
+      prev.includes(subject) 
+        ? prev.filter(s => s !== subject)
+        : [...prev, subject]
+    );
+  };
+
+  const startExam = async () => {
+    if (selectedSubjects.length === 0) return;
+    
+    // Use async function that includes uploaded questions
+    const qs = await getAllQuestionsWithUploaded(level, selectedSubjects, questionCount);
+    setQuestions(qs);
+    setTimeLeft(duration * 60);
+    setAnswers({});
+    setMarkedForReview(new Set());
+    setCurrentIndex(0);
+    setView('exam');
+    
+    // Increment mock exam counter (triggers rating popup after first exam)
+    if (isFirstMockExam) {
+      incrementMockExams();
+    }
+  };
+
+  const handleSelectAnswer = (answer: string) => {
+    setAnswers(prev => ({ ...prev, [currentIndex]: answer }));
+  };
+
+  const handleNext = () => {
+    if (currentIndex < questions.length - 1) {
+      setCurrentIndex(prev => prev + 1);
+    }
+  };
+
+  const handlePrev = () => {
+    if (currentIndex > 0) {
+      setCurrentIndex(prev => prev - 1);
+    }
+  };
+
+  const toggleMark = () => {
+    setMarkedForReview(prev => {
       const newSet = new Set(prev);
-      if (isLiked) {
-        newSet.delete(post.id);
-      } else {
-        newSet.add(post.id);
-      }
+      if (newSet.has(currentIndex)) newSet.delete(currentIndex);
+      else newSet.add(currentIndex);
       return newSet;
     });
+  };
 
-    setPosts(prev => prev.map(p => {
-      if (p.id === post.id) {
-        return {
-          ...p,
-          likes: isLiked ? Math.max(0, p.likes - 1) : p.likes + 1
-        };
-      }
-      return p;
-    }));
+  const calculateJAMBScore = (correct: number, total: number): number => {
+    // Real JAMB scoring: Each correct answer = (400 / total questions) marks
+    // For standard JAMB: 180 questions = 400 marks, so each = 2.22 marks
+    // We simulate this proportionally
+    return Math.round((correct / total) * 400);
+  };
 
-    try {
-      if (isFirebaseConfigured()) {
-        await toggleLikePost(post.id, userId);
-      } else {
-        const postIdNum = post.odId || parseInt(post.id) || 0;
-        const userIdNum = typeof currentUser.id === 'number' 
-          ? currentUser.id 
-          : parseInt(String(currentUser.id)) || 0;
-        
-        if (isLiked) {
-          await db.postLikes.where({ postId: postIdNum, userId: userIdNum }).delete();
-          await db.forumPosts.update(postIdNum, { likes: Math.max(0, post.likes - 1) });
-        } else {
-          await db.postLikes.add({ postId: postIdNum, userId: userIdNum });
-          await db.forumPosts.update(postIdNum, { likes: post.likes + 1 });
-        }
+  const getGrade = (percentage: number): string => {
+    if (percentage >= 75) return 'A';
+    if (percentage >= 65) return 'B';
+    if (percentage >= 55) return 'C';
+    if (percentage >= 45) return 'D';
+    if (percentage >= 40) return 'E';
+    return 'F';
+  };
+
+  const getStatus = (percentage: number): 'excellent' | 'good' | 'average' | 'poor' | 'fail' => {
+    if (percentage >= 75) return 'excellent';
+    if (percentage >= 60) return 'good';
+    if (percentage >= 50) return 'average';
+    if (percentage >= 40) return 'poor';
+    return 'fail';
+  };
+
+  const getPercentile = (jambScore: number): number => {
+    // Estimated percentile based on JAMB score distribution
+    if (jambScore >= 350) return 99;
+    if (jambScore >= 320) return 95;
+    if (jambScore >= 300) return 90;
+    if (jambScore >= 280) return 80;
+    if (jambScore >= 260) return 70;
+    if (jambScore >= 240) return 60;
+    if (jambScore >= 220) return 50;
+    if (jambScore >= 200) return 40;
+    if (jambScore >= 180) return 30;
+    return 20;
+  };
+
+  const generateAnalysis = (): ExamAnalysis => {
+    const subjectBreakdown: Record<string, { correct: number; total: number; topics: Record<string, { correct: number; total: number }> }> = {};
+
+    questions.forEach((q, idx) => {
+      if (!subjectBreakdown[q.subject]) {
+        subjectBreakdown[q.subject] = { correct: 0, total: 0, topics: {} };
       }
-    } catch (err) {
-      console.error('Error toggling like:', err);
-      // Revert optimistic update
-      setLikedPosts(prev => {
-        const newSet = new Set(prev);
-        if (isLiked) {
-          newSet.add(post.id);
-        } else {
-          newSet.delete(post.id);
-        }
-        return newSet;
+      subjectBreakdown[q.subject].total++;
+      
+      if (!subjectBreakdown[q.subject].topics[q.topic]) {
+        subjectBreakdown[q.subject].topics[q.topic] = { correct: 0, total: 0 };
+      }
+      subjectBreakdown[q.subject].topics[q.topic].total++;
+
+      if (answers[idx] === q.correctAnswer) {
+        subjectBreakdown[q.subject].correct++;
+        subjectBreakdown[q.subject].topics[q.topic].correct++;
+      }
+    });
+
+    const totalCorrect = Object.values(subjectBreakdown).reduce((sum, s) => sum + s.correct, 0);
+    const totalQuestions = questions.length;
+    const overallPercentage = Math.round((totalCorrect / totalQuestions) * 100);
+    const jambScore = calculateJAMBScore(totalCorrect, totalQuestions);
+    const percentile = getPercentile(jambScore);
+    const timeSpent = duration * 60 - timeLeft;
+    const timeEfficiency = Math.round((timeSpent / (duration * 60)) * 100);
+
+    const subjectAnalyses: SubjectAnalysis[] = Object.entries(subjectBreakdown).map(([subject, data]) => {
+      const percentage = Math.round((data.correct / data.total) * 100);
+      const weakTopics = Object.entries(data.topics)
+        .filter(([_, t]) => (t.correct / t.total) < 0.5)
+        .map(([topic]) => topic);
+      
+      const subjectJambScore = Math.round((data.correct / data.total) * 100); // Score per subject out of 100
+
+      return {
+        subject,
+        correct: data.correct,
+        total: data.total,
+        percentage,
+        jambScore: subjectJambScore,
+        grade: getGrade(percentage),
+        status: getStatus(percentage),
+        weakTopics,
+        recommendations: weakTopics.length > 0 
+          ? [`Focus more on ${weakTopics.join(', ')} in ${subject}`, `Practice ${subject} questions daily`]
+          : [`Maintain your excellent performance in ${subject}`]
+      };
+    });
+
+    const strengths = subjectAnalyses
+      .filter(s => s.percentage >= 70)
+      .map(s => `Strong in ${s.subject} (${s.percentage}%)`);
+
+    const weaknesses = subjectAnalyses
+      .filter(s => s.percentage < 50)
+      .map(s => `Needs improvement in ${s.subject} (${s.percentage}%)`);
+
+    const allWeakTopics = subjectAnalyses.flatMap(s => s.weakTopics);
+    
+    const recommendations: string[] = [];
+    if (jambScore < 200) {
+      recommendations.push('Dedicate at least 4 hours daily to intensive study');
+      recommendations.push('Focus on understanding concepts rather than memorization');
+    } else if (jambScore < 280) {
+      recommendations.push('Practice more past questions daily');
+      recommendations.push('Work on time management during exams');
+    } else {
+      recommendations.push('Maintain your study routine');
+      recommendations.push('Challenge yourself with harder questions');
+    }
+    
+    if (allWeakTopics.length > 0) {
+      recommendations.push(`Pay special attention to: ${allWeakTopics.slice(0, 3).join(', ')}`);
+    }
+
+    const universityChances = [
+      { tier: 'Top Universities (UNILAG, UI, OAU)', chance: jambScore >= 280 ? 'High' : jambScore >= 250 ? 'Medium' : 'Low' },
+      { tier: 'Federal Universities', chance: jambScore >= 250 ? 'High' : jambScore >= 200 ? 'Medium' : 'Low' },
+      { tier: 'State Universities', chance: jambScore >= 200 ? 'High' : jambScore >= 180 ? 'Medium' : 'Low' },
+      { tier: 'Private Universities', chance: jambScore >= 180 ? 'High' : jambScore >= 150 ? 'Medium' : 'Low' },
+    ];
+
+    return {
+      overallScore: overallPercentage,
+      jambScore,
+      percentile,
+      grade: getGrade(overallPercentage),
+      status: jambScore >= 300 ? 'Excellent Performance!' : jambScore >= 250 ? 'Very Good Performance!' : jambScore >= 200 ? 'Good Performance' : 'Needs Improvement',
+      timeEfficiency,
+      subjects: subjectAnalyses,
+      strengths,
+      weaknesses,
+      recommendations,
+      predictedRange: { min: Math.max(0, jambScore - 25), max: Math.min(400, jambScore + 25) },
+      universityChances
+    };
+  };
+
+  const handleSubmit = useCallback(async () => {
+    const analysis = generateAnalysis();
+
+    // Save to IndexedDB
+    if (currentUser) {
+      await db.mockExamResults.add({
+        userId: typeof currentUser.id === 'string' ? parseInt(currentUser.id) || 0 : currentUser.id,
+        subjects: selectedSubjects,
+        totalQuestions: questions.length,
+        correctAnswers: Math.round((analysis.overallScore / 100) * questions.length),
+        score: analysis.overallScore,
+        jambScore: analysis.jambScore,
+        duration: duration * 60,
+        timeSpent: duration * 60 - timeLeft,
+        subjectBreakdown: analysis.subjects.reduce((acc, s) => ({
+          ...acc,
+          [s.subject]: { correct: s.correct, total: s.total }
+        }), {}),
+        timestamp: new Date(),
+        answers
       });
+
+      updateUserStats(questions.length, Math.round((analysis.overallScore / 100) * questions.length));
     }
-  }, [currentUser, likedPosts]);
 
-  const handleAddComment = useCallback(async () => {
-    if (!newComment.trim() || !selectedPost || !currentUser || submitting) return;
+    setView('result');
+  }, [questions, answers, currentUser, selectedSubjects, duration, timeLeft, updateUserStats]);
 
-    setSubmitting(true);
-    setError(null);
-    const commentContent = newComment.trim();
-
-    console.log('💬 Adding comment...');
-
-    try {
-      if (isFirebaseConfigured()) {
-        // Create in Firebase - subscription will update UI
-        const commentId = await addComment(
-          selectedPost.id,
-          String(currentUser.id),
-          currentUser.fullName,
-          commentContent
-        );
-        
-        console.log('✅ Comment created in Firebase:', commentId);
-        setNewComment('');
-        
-      } else {
-        // Create in IndexedDB
-        const postIdNum = selectedPost.odId || parseInt(selectedPost.id) || 0;
-        const userIdNum = typeof currentUser.id === 'number' 
-          ? currentUser.id 
-          : parseInt(String(currentUser.id)) || Date.now();
-        
-        const localCommentId = await db.forumComments.add({
-          postId: postIdNum,
-          userId: userIdNum,
-          userName: currentUser.fullName,
-          content: commentContent,
-          timestamp: new Date()
-        });
-        
-        console.log('✅ Comment created in IndexedDB:', localCommentId);
-        
-        // Add to local state
-        const newCommentObj: Comment = {
-          id: String(localCommentId),
-          postId: selectedPost.id,
-          userId: String(userIdNum),
-          userName: currentUser.fullName,
-          content: commentContent,
-          timestamp: Date.now()
-        };
-        setComments(prev => ({
-          ...prev,
-          [selectedPost.id]: [...(prev[selectedPost.id] || []), newCommentObj]
-        }));
-        setNewComment('');
-      }
-    } catch (err) {
-      console.error('❌ Error adding comment:', err);
-      setError('Failed to add comment. Please try again.');
-    } finally {
-      setSubmitting(false);
-    }
-  }, [newComment, selectedPost, currentUser, submitting]);
-
-  const handleDeletePost = async (postId: string) => {
-    if (!currentUser) return;
-    
-    try {
-      if (isFirebaseConfigured()) {
-        await firebaseDeletePost(postId);
-      } else {
-        const postIdNum = parseInt(postId) || 0;
-        await db.forumPosts.delete(postIdNum);
-        setPosts(prev => prev.filter(p => p.id !== postId));
-      }
-    } catch (err) {
-      console.error('Error deleting post:', err);
-    }
-  };
-
-  const handleDeleteComment = async (commentId: string) => {
-    if (!selectedPost) return;
-    
-    try {
-      const commentIdNum = parseInt(commentId) || 0;
-      await db.forumComments.delete(commentIdNum);
-      setComments(prev => ({
-        ...prev,
-        [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== commentId) || []
-      }));
-    } catch (err) {
-      console.error('Error deleting comment:', err);
-    }
-  };
-
-  const handleRefresh = () => {
-    setLoading(true);
-    setError(null);
-    
-    // Reset and reload
-    if (unsubscribePostsRef.current) {
-      unsubscribePostsRef.current();
-      unsubscribePostsRef.current = null;
-    }
-    
-    // Trigger reload by updating a dependency
-    setPosts([]);
-    
-    setTimeout(() => {
-      if (isFirebaseConfigured()) {
-        unsubscribePostsRef.current = subscribeToPosts((firebasePosts) => {
-          const formattedPosts: Post[] = firebasePosts.map(p => ({
-            id: String(p.id),
-            userId: String(p.userId || ''),
-            userName: p.userName || 'Anonymous',
-            userLevel: p.userLevel || 'Student',
-            content: p.content || '',
-            timestamp: p.createdAt || Date.now(),
-            likes: p.likes || 0
-          }));
-          formattedPosts.sort((a, b) => b.timestamp - a.timestamp);
-          setPosts(formattedPosts);
-          setLoading(false);
-        });
-      } else {
-        loadFromIndexedDB();
-      }
-    }, 500);
-  };
-
-  const formatTime = (timestamp: number) => {
-    const now = Date.now();
-    const diff = now - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return `${days}d ago`;
-  };
-
-  const isAdmin = currentUser?.email === 'ememzyvisuals@gmail.com';
-
-  if (!currentUser) {
-    return (
-      <div className={`min-h-screen flex items-center justify-center p-4 ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
-        <div className="text-center">
-          <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-400'}`} />
-          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Please login to access the forum</p>
-        </div>
-      </div>
-    );
-  }
+  const currentQuestion = questions[currentIndex];
+  const analysis = view === 'result' ? generateAnalysis() : null;
 
   return (
-    <div className={`min-h-screen ${isDark ? 'bg-black' : 'bg-gray-100'}`}>
-      {/* Header */}
-      <div className={`sticky top-0 z-40 backdrop-blur-xl border-b ${isDark ? 'bg-black/80 border-white/10' : 'bg-white/80 border-gray-200'}`}>
-        <div className="flex items-center justify-between p-4">
+    <div className={`min-h-screen ${isDark ? 'ambient-bg' : 'bg-gray-50'}`}>
+      {/* Header with Menu + Title + Timer (left) + Calculator */}
+      <div className={`sticky top-0 z-30 px-4 py-3 ${isDark ? 'bg-black/90' : 'bg-white/90'} backdrop-blur-xl border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+        <div className="flex items-center justify-between max-w-2xl mx-auto">
+          {/* Left side: Menu + Timer (during exam) or Title */}
           <div className="flex items-center gap-3">
-            {selectedPost ? (
-              <button
-                onClick={() => setSelectedPost(null)}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
-              >
-                <ArrowLeft className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
-              </button>
-            ) : (
-              <button
-                onClick={onOpenMenu}
-                className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
-              >
-                <Menu className={`w-5 h-5 ${isDark ? 'text-white' : 'text-gray-900'}`} />
-              </button>
-            )}
-            <div>
-              <h1 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                {selectedPost ? 'Discussion' : 'Community'}
-              </h1>
-              <div className="flex items-center gap-1 text-xs">
-                {connectionStatus === 'connecting' ? (
-                  <>
-                    <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />
-                    <span className="text-yellow-400">Connecting...</span>
-                  </>
-                ) : connectionStatus === 'connected' ? (
-                  <>
-                    <Wifi className="w-3 h-3 text-green-400" />
-                    <span className="text-green-400">Live • All users synced</span>
-                  </>
-                ) : (
-                  <>
-                    <WifiOff className="w-3 h-3 text-yellow-400" />
-                    <span className="text-yellow-400">Offline Mode</span>
-                  </>
-                )}
+            <button 
+              onClick={onOpenMenu} 
+              className={`p-2 rounded-xl transition-colors ${isDark ? 'hover:bg-white/10 text-white' : 'hover:bg-gray-100 text-gray-700'}`}
+            >
+              <Menu size={22} strokeWidth={1.5} />
+            </button>
+            
+            {view === 'exam' ? (
+              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl ${
+                timeLeft < 300 ? 'bg-error text-white animate-pulse' : isDark ? 'bg-white/10 text-white' : 'bg-gray-100 text-gray-900'
+              }`}>
+                <Clock size={18} strokeWidth={2} />
+                <span className="font-mono font-bold text-lg">{formatTime(timeLeft)}</span>
               </div>
-            </div>
+            ) : (
+              <h1 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                Mock Exam
+              </h1>
+            )}
           </div>
           
-          <button
-            onClick={handleRefresh}
-            disabled={loading}
-            className={`w-10 h-10 rounded-xl flex items-center justify-center ${isDark ? 'bg-white/10 hover:bg-white/20' : 'bg-gray-200 hover:bg-gray-300'}`}
-          >
-            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''} ${isDark ? 'text-white' : 'text-gray-900'}`} />
-          </button>
+          {/* Right side: Calculator (during exam) */}
+          {view === 'exam' && (
+            <button 
+              onClick={() => setShowCalculator(!showCalculator)} 
+              className={`p-2.5 rounded-xl transition-colors ${showCalculator ? 'bg-primary/20 text-primary' : isDark ? 'hover:bg-white/10 text-white/70' : 'hover:bg-gray-100 text-gray-600'}`}
+            >
+              <Calculator size={22} strokeWidth={1.5} />
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Error Message */}
-      {error && (
-        <div className="mx-4 mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-xl flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
-          <span className="text-red-400 text-sm">{error}</span>
-        </div>
-      )}
-
-      {/* Loading State */}
-      {loading && (
-        <div className="flex flex-col items-center justify-center py-20">
-          <Loader2 className="w-10 h-10 text-blue-500 animate-spin mb-4" />
-          <p className={isDark ? 'text-gray-400' : 'text-gray-600'}>Loading posts...</p>
-        </div>
-      )}
-
-      {/* Post Detail View */}
-      {!loading && selectedPost && (
-        <div className="p-4 pb-32">
-          {/* Selected Post */}
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
-          >
-            <div className="flex items-start gap-3 mb-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
-                <User className="w-5 h-5 text-white" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{selectedPost.userName}</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
-                    {selectedPost.userLevel}
-                  </span>
-                </div>
-                <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                  <Clock className="w-3 h-3" />
-                  <span>{formatTime(selectedPost.timestamp)}</span>
-                </div>
-              </div>
-            </div>
-            <p className={`text-base leading-relaxed ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{selectedPost.content}</p>
-            <div className={`flex items-center gap-4 mt-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
-              <button
-                onClick={() => handleLike(selectedPost)}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
-                  likedPosts.has(selectedPost.id)
-                    ? 'bg-red-500/20 text-red-400'
-                    : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
-                }`}
-              >
-                <Heart className={`w-4 h-4 ${likedPosts.has(selectedPost.id) ? 'fill-current' : ''}`} />
-                <span className="text-sm">{selectedPost.likes}</span>
-              </button>
-              <div className={`flex items-center gap-2 ${isDark ? 'text-gray-400' : 'text-gray-500'}`}>
-                <MessageCircle className="w-4 h-4" />
-                <span className="text-sm">{comments[selectedPost.id]?.length || 0}</span>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Comments */}
-          <div className="mb-6">
-            <h3 className={`text-lg font-semibold mb-4 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
-              Comments ({comments[selectedPost.id]?.length || 0})
-            </h3>
-            
-            <div className="space-y-3">
-              <AnimatePresence>
-                {comments[selectedPost.id]?.map((comment, index) => (
-                  <motion.div
-                    key={comment.id}
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    transition={{ delay: index * 0.05 }}
-                    className={`rounded-xl p-3 border ${isDark ? 'bg-white/5 border-white/5' : 'bg-gray-50 border-gray-200'}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-green-500 to-teal-600 flex items-center justify-center">
-                          <User className="w-3.5 h-3.5 text-white" />
-                        </div>
-                        <span className={`font-medium text-sm ${isDark ? 'text-white' : 'text-gray-900'}`}>{comment.userName}</span>
-                        <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>{formatTime(comment.timestamp)}</span>
-                      </div>
-                      {isAdmin && (
-                        <button
-                          onClick={() => handleDeleteComment(comment.id)}
-                          className={`p-1.5 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                    <p className={`text-sm pl-9 ${isDark ? 'text-gray-300' : 'text-gray-600'}`}>{comment.content}</p>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-              
-              {(!comments[selectedPost.id] || comments[selectedPost.id].length === 0) && (
-                <div className="text-center py-8">
-                  <MessageCircle className={`w-12 h-12 mx-auto mb-3 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
-                  <p className={isDark ? 'text-gray-500' : 'text-gray-400'}>No comments yet. Be the first!</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Add Comment Input - Fixed at bottom */}
-          <div className={`fixed bottom-0 left-0 right-0 backdrop-blur-xl border-t p-4 ${isDark ? 'bg-black/90 border-white/10' : 'bg-white/90 border-gray-200'}`} style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
-            <div className="flex gap-3 max-w-lg mx-auto">
-              <input
-                type="text"
-                value={newComment}
-                onChange={(e) => setNewComment(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleAddComment()}
-                placeholder="Write a comment..."
-                className={`flex-1 border rounded-xl px-4 py-3 text-base focus:outline-none focus:border-blue-500 ${
-                  isDark 
-                    ? 'bg-white/10 border-white/20 text-white placeholder-gray-500' 
-                    : 'bg-gray-100 border-gray-200 text-gray-900 placeholder-gray-400'
-                }`}
-              />
-              <button
-                onClick={handleAddComment}
-                disabled={!newComment.trim() || submitting}
-                className="w-12 h-12 rounded-xl bg-blue-500 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {submitting ? (
-                  <Loader2 className="w-5 h-5 text-white animate-spin" />
-                ) : (
-                  <Send className="w-5 h-5 text-white" />
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Posts List View */}
-      {!loading && !selectedPost && (
-        <div className="p-4 pb-32">
-          {/* Connection Info Banner */}
-          {connectionStatus === 'offline' && (
-            <div className={`mb-4 p-3 rounded-xl flex items-center gap-2 ${isDark ? 'bg-yellow-500/10 border border-yellow-500/20' : 'bg-yellow-50 border border-yellow-200'}`}>
-              <WifiOff className="w-5 h-5 text-yellow-500 flex-shrink-0" />
-              <div className="flex-1">
-                <p className={`text-sm font-medium ${isDark ? 'text-yellow-400' : 'text-yellow-700'}`}>Offline Mode</p>
-                <p className={`text-xs ${isDark ? 'text-yellow-500/70' : 'text-yellow-600'}`}>
-                  Posts are saved locally. Add Firebase config to sync with all users.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Create Post */}
-          <div className={`backdrop-blur-xl rounded-2xl p-4 border mb-6 ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}>
-            <textarea
-              value={newPost}
-              onChange={(e) => setNewPost(e.target.value)}
-              placeholder="Share something with the community..."
-              rows={3}
-              className={`w-full bg-transparent resize-none focus:outline-none text-base ${
-                isDark ? 'text-white placeholder-gray-500' : 'text-gray-900 placeholder-gray-400'
-              }`}
-            />
-            <div className="flex justify-between items-center mt-3">
-              <span className={`text-xs ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                {newPost.length}/500
-              </span>
-              <button
-                onClick={handleCreatePost}
-                disabled={!newPost.trim() || submitting || newPost.length > 500}
-                className="px-5 py-2.5 rounded-xl bg-blue-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {submitting ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Send className="w-4 h-4" />
-                )}
-                Post
-              </button>
-            </div>
-          </div>
-
-          {/* Posts */}
-          <div className="space-y-4">
-            <AnimatePresence>
-              {posts.map((post, index) => (
-                <motion.div
-                  key={post.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -20 }}
-                  transition={{ delay: index * 0.03 }}
-                  className={`backdrop-blur-xl rounded-2xl p-4 border ${isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-200'}`}
-                >
-                  <div className="flex items-start gap-3 mb-3">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center flex-shrink-0">
-                      <User className="w-5 h-5 text-white" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`font-semibold ${isDark ? 'text-white' : 'text-gray-900'}`}>{post.userName}</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">
-                          {post.userLevel}
+      <div className="px-4 py-4 pb-24">
+        <AnimatePresence mode="wait">
+          {/* Setup */}
+          {view === 'setup' && (
+            <motion.div
+              key="setup"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="space-y-6"
+            >
+              {/* JAMB Info Card */}
+              <GlassCard hover={false} className={`${bgCard} border-l-4 border-l-primary`}>
+                <div className="flex items-start gap-3">
+                  <Award className="w-6 h-6 text-primary flex-shrink-0 mt-1" />
+                  <div>
+                    <h3 className={`font-bold ${textColor} mb-1`}>Real JAMB Scoring System</h3>
+                    <p className={`text-sm ${textMuted}`}>
+                      This mock exam uses the official JAMB scoring method. Your final score will be calculated out of 400 marks, just like the real exam.
+                    </p>
+                    {uploadedQuestionsCount > 0 && (
+                      <div className="flex items-center gap-2 mt-2">
+                        <Wifi size={14} className="text-green-500" />
+                        <span className="text-xs text-green-500 font-medium">
+                          +{uploadedQuestionsCount} questions synced from cloud
                         </span>
                       </div>
-                      <div className={`flex items-center gap-1 text-xs mt-0.5 ${isDark ? 'text-gray-500' : 'text-gray-400'}`}>
-                        <Clock className="w-3 h-3" />
-                        <span>{formatTime(post.timestamp)}</span>
-                      </div>
-                    </div>
-                    {isAdmin && (
-                      <button
-                        onClick={() => handleDeletePost(post.id)}
-                        className={`p-2 rounded-lg transition-colors ${isDark ? 'hover:bg-red-500/20 text-gray-500 hover:text-red-400' : 'hover:bg-red-100 text-gray-400 hover:text-red-500'}`}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
                     )}
                   </div>
-                  
-                  <p className={`text-base leading-relaxed mb-4 ${isDark ? 'text-gray-200' : 'text-gray-700'}`}>{post.content}</p>
-                  
-                  <div className={`flex items-center gap-4 pt-3 border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+                </div>
+              </GlassCard>
+
+              <GlassCard hover={false} className={bgCard}>
+                <h2 className={`text-lg font-bold ${textColor} mb-4`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  Select Subjects
+                </h2>
+                <div className="grid grid-cols-2 gap-2">
+                  {subjects.map(subject => (
                     <button
-                      onClick={() => handleLike(post)}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${
-                        likedPosts.has(post.id)
-                          ? 'bg-red-500/20 text-red-400'
-                          : isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'
+                      key={subject}
+                      onClick={() => toggleSubject(subject)}
+                      className={`p-3 rounded-xl text-sm font-medium transition-all ${
+                        selectedSubjects.includes(subject)
+                          ? 'bg-primary text-white shadow-lg shadow-primary/30'
+                          : isDark ? 'bg-white/5 text-white/70 border border-white/10' : 'bg-gray-100 text-gray-700 border border-gray-200'
                       }`}
                     >
-                      <Heart className={`w-4 h-4 ${likedPosts.has(post.id) ? 'fill-current' : ''}`} />
-                      <span className="text-sm">{post.likes}</span>
+                      {subject}
                     </button>
-                    <button
-                      onClick={() => setSelectedPost(post)}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors ${isDark ? 'text-gray-400 hover:bg-white/5' : 'text-gray-500 hover:bg-gray-100'}`}
-                    >
-                      <MessageCircle className="w-4 h-4" />
-                      <span className="text-sm">Comment</span>
-                    </button>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
+                  ))}
+                </div>
+                {selectedSubjects.length > 0 && (
+                  <p className={`text-sm ${textMuted} mt-3`}>
+                    Selected: {selectedSubjects.join(', ')}
+                  </p>
+                )}
+              </GlassCard>
 
-            {posts.length === 0 && (
-              <div className="text-center py-12">
-                <MessageSquare className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-600' : 'text-gray-300'}`} />
-                <h3 className={`text-xl font-semibold mb-2 ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
-                  No posts yet
-                </h3>
-                <p className={isDark ? 'text-gray-400' : 'text-gray-500'}>Be the first to start a discussion!</p>
+              <GlassCard hover={false} className={bgCard}>
+                <h2 className={`text-lg font-bold ${textColor} mb-4`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  Exam Settings
+                </h2>
+                <div className="space-y-4">
+                  <Select
+                    label="Number of Questions"
+                    value={questionCount.toString()}
+                    onChange={e => setQuestionCount(parseInt(e.target.value))}
+                    options={[
+                      { value: '20', label: '20 Questions (Quick Test)' },
+                      { value: '40', label: '40 Questions (Standard)' },
+                      { value: '60', label: '60 Questions (Full Subject)' },
+                      { value: '80', label: '80 Questions (Extended)' },
+                      { value: '180', label: '180 Questions (Full JAMB Simulation)' }
+                    ]}
+                  />
+                  <Select
+                    label="Duration"
+                    value={duration.toString()}
+                    onChange={e => setDuration(parseInt(e.target.value))}
+                    options={[
+                      { value: '30', label: '30 Minutes' },
+                      { value: '60', label: '1 Hour' },
+                      { value: '90', label: '1.5 Hours' },
+                      { value: '120', label: '2 Hours (JAMB Standard)' },
+                      { value: '150', label: '2.5 Hours' }
+                    ]}
+                  />
+                </div>
+              </GlassCard>
+
+              <Button 
+                onClick={startExam} 
+                fullWidth 
+                disabled={selectedSubjects.length === 0}
+                icon={<Play size={20} />}
+              >
+                Start JAMB Mock Exam
+              </Button>
+            </motion.div>
+          )}
+
+          {/* Exam */}
+          {view === 'exam' && currentQuestion && (
+            <motion.div
+              key="exam"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="space-y-4"
+            >
+              {/* Progress */}
+              <div className="flex items-center justify-between text-sm">
+                <span className={textMuted}>Question {currentIndex + 1}/{questions.length}</span>
+                <button 
+                  onClick={() => setShowQuestionNav(!showQuestionNav)}
+                  className="text-primary font-medium flex items-center gap-1"
+                >
+                  Jump to Question
+                  {showQuestionNav ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
               </div>
-            )}
-          </div>
-        </div>
-      )}
+
+              {/* Question Navigation */}
+              <AnimatePresence>
+                {showQuestionNav && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className={`flex flex-wrap gap-2 p-3 rounded-xl ${isDark ? 'bg-white/5' : 'bg-gray-100'}`}>
+                      {questions.map((_, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => { setCurrentIndex(idx); setShowQuestionNav(false); }}
+                          className={`w-8 h-8 rounded-lg text-xs font-medium ${
+                            idx === currentIndex ? 'bg-primary text-white' :
+                            answers[idx] ? 'bg-success/20 text-success' :
+                            markedForReview.has(idx) ? 'bg-warning/20 text-warning' :
+                            isDark ? 'bg-white/10 text-white/60' : 'bg-white text-gray-600'
+                          }`}
+                        >
+                          {idx + 1}
+                        </button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Question */}
+              <GlassCard className={`py-6 ${bgCard}`} hover={false}>
+                <div className="flex items-start justify-between mb-4">
+                  <span className="text-xs px-2 py-1 rounded-full bg-primary/20 text-primary">
+                    {currentQuestion.subject}
+                  </span>
+                  <button
+                    onClick={toggleMark}
+                    className={`p-1.5 rounded-lg ${
+                      markedForReview.has(currentIndex) ? 'bg-warning/20 text-warning' : textMuted
+                    }`}
+                  >
+                    <Flag size={18} />
+                  </button>
+                </div>
+                <p className={`text-lg ${textColor} leading-relaxed`}>{currentQuestion.text}</p>
+              </GlassCard>
+
+              {/* Options */}
+              <div className="space-y-3">
+                {currentQuestion.options.map((option, idx) => {
+                  const letter = ['A', 'B', 'C', 'D'][idx];
+                  const isSelected = answers[currentIndex] === letter;
+
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => handleSelectAnswer(letter)}
+                      className={`w-full p-4 rounded-xl text-left transition-all ${
+                        isSelected
+                          ? 'bg-primary/20 border-2 border-primary'
+                          : isDark ? 'bg-white/5 border border-white/10 hover:border-white/20' : 'bg-white border border-gray-200 hover:border-primary/50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <span className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-medium ${
+                          isSelected ? 'bg-primary text-white' : isDark ? 'bg-white/10 text-white/60' : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {letter}
+                        </span>
+                        <span className={textColor}>{option}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Navigation */}
+              <div className="flex gap-3">
+                <Button onClick={handlePrev} variant="secondary" disabled={currentIndex === 0} className="flex-1">
+                  Previous
+                </Button>
+                {currentIndex === questions.length - 1 ? (
+                  <Button onClick={handleSubmit} variant="primary" className="flex-1">
+                    Submit Exam
+                  </Button>
+                ) : (
+                  <Button onClick={handleNext} className="flex-1" icon={<ArrowRight size={18} />}>
+                    Next
+                  </Button>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {/* Results */}
+          {view === 'result' && analysis && (
+            <motion.div
+              key="result"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="space-y-6"
+            >
+              {/* Main Score Card */}
+              <GlassCard className={`text-center py-8 ${bgCard}`} hover={false} neonBorder={isDark}>
+                <div className={`w-28 h-28 mx-auto rounded-full flex items-center justify-center mb-4 ${
+                  analysis.jambScore >= 280 ? 'bg-success/20' : analysis.jambScore >= 200 ? 'bg-warning/20' : 'bg-error/20'
+                }`}>
+                  <div>
+                    <span className={`text-4xl font-black ${textColor}`}>{analysis.jambScore}</span>
+                    <span className={`text-lg ${textMuted}`}>/400</span>
+                  </div>
+                </div>
+                <h2 className={`text-xl font-bold ${textColor} mb-2`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  {analysis.status}
+                </h2>
+                <p className={`${textMuted} mb-4`}>
+                  You scored in the top {100 - analysis.percentile}% of students
+                </p>
+                <div className="flex justify-center gap-4">
+                  <div className="text-center">
+                    <p className={`text-2xl font-bold ${textColor}`}>{analysis.grade}</p>
+                    <p className={`text-xs ${textMuted}`}>Grade</p>
+                  </div>
+                  <div className={`w-px ${isDark ? 'bg-white/10' : 'bg-gray-200'}`} />
+                  <div className="text-center">
+                    <p className={`text-2xl font-bold ${textColor}`}>{analysis.overallScore}%</p>
+                    <p className={`text-xs ${textMuted}`}>Accuracy</p>
+                  </div>
+                  <div className={`w-px ${isDark ? 'bg-white/10' : 'bg-gray-200'}`} />
+                  <div className="text-center">
+                    <p className={`text-2xl font-bold ${textColor}`}>{analysis.timeEfficiency}%</p>
+                    <p className={`text-xs ${textMuted}`}>Time Used</p>
+                  </div>
+                </div>
+              </GlassCard>
+
+              {/* Predicted Score Range */}
+              <GlassCard hover={false} className={bgCard} neonBorder={isDark}>
+                <div className="flex items-center gap-3 mb-4">
+                  <TrendingUp className="w-6 h-6 text-primary" />
+                  <h3 className={`font-bold ${textColor}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                    JAMB Score Prediction
+                  </h3>
+                </div>
+                <div className={`text-center py-4 rounded-xl ${isDark ? 'bg-white/5' : 'bg-gray-50'}`}>
+                  <p className={`text-sm ${textMuted} mb-2`}>Your predicted JAMB score range:</p>
+                  <p className={`text-3xl font-black ${textColor}`}>
+                    {analysis.predictedRange.min} - {analysis.predictedRange.max}
+                  </p>
+                </div>
+              </GlassCard>
+
+              {/* Subject Performance */}
+              <GlassCard hover={false} className={bgCard}>
+                <div className="flex items-center gap-2 mb-4">
+                  <BarChart3 className="w-5 h-5 text-primary" />
+                  <h3 className={`font-bold ${textColor}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                    Subject Performance
+                  </h3>
+                </div>
+                <div className="space-y-4">
+                  {analysis.subjects.map((subject) => (
+                    <div key={subject.subject}>
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className={textColor}>{subject.subject}</span>
+                        <span className={subject.percentage >= 60 ? 'text-success' : subject.percentage >= 40 ? 'text-warning' : 'text-error'}>
+                          {subject.correct}/{subject.total} ({subject.percentage}%) - Grade {subject.grade}
+                        </span>
+                      </div>
+                      <div className={`h-3 rounded-full overflow-hidden ${isDark ? 'bg-white/10' : 'bg-gray-200'}`}>
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${subject.percentage}%` }}
+                          transition={{ delay: 0.3, duration: 0.5 }}
+                          className={`h-full rounded-full ${
+                            subject.percentage >= 70 ? 'bg-success' : subject.percentage >= 50 ? 'bg-warning' : 'bg-error'
+                          }`}
+                        />
+                      </div>
+                      {subject.weakTopics.length > 0 && (
+                        <p className={`text-xs ${textMuted} mt-1`}>
+                          Weak areas: {subject.weakTopics.join(', ')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </GlassCard>
+
+              {/* Toggle Detailed Analysis */}
+              <button
+                onClick={() => setShowDetailedAnalysis(!showDetailedAnalysis)}
+                className={`w-full p-4 rounded-xl flex items-center justify-center gap-2 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-gray-100 hover:bg-gray-200'} transition-colors`}
+              >
+                <FileText size={20} className="text-primary" />
+                <span className={`font-medium ${textColor}`}>
+                  {showDetailedAnalysis ? 'Hide' : 'Show'} Detailed Analysis
+                </span>
+                {showDetailedAnalysis ? <ChevronUp size={20} className={textMuted} /> : <ChevronDown size={20} className={textMuted} />}
+              </button>
+
+              <AnimatePresence>
+                {showDetailedAnalysis && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="space-y-4"
+                  >
+                    {/* Strengths */}
+                    {analysis.strengths.length > 0 && (
+                      <GlassCard hover={false} className={`${bgCard} border-l-4 border-l-success`}>
+                        <div className="flex items-center gap-2 mb-3">
+                          <Zap className="w-5 h-5 text-success" />
+                          <h3 className={`font-bold ${textColor}`}>Your Strengths</h3>
+                        </div>
+                        <ul className="space-y-2">
+                          {analysis.strengths.map((strength, idx) => (
+                            <li key={idx} className={`flex items-center gap-2 text-sm ${textMuted}`}>
+                              <CheckCircle size={16} className="text-success" />
+                              {strength}
+                            </li>
+                          ))}
+                        </ul>
+                      </GlassCard>
+                    )}
+
+                    {/* Weaknesses */}
+                    {analysis.weaknesses.length > 0 && (
+                      <GlassCard hover={false} className={`${bgCard} border-l-4 border-l-error`}>
+                        <div className="flex items-center gap-2 mb-3">
+                          <AlertTriangle className="w-5 h-5 text-error" />
+                          <h3 className={`font-bold ${textColor}`}>Areas for Improvement</h3>
+                        </div>
+                        <ul className="space-y-2">
+                          {analysis.weaknesses.map((weakness, idx) => (
+                            <li key={idx} className={`flex items-center gap-2 text-sm ${textMuted}`}>
+                              <XCircle size={16} className="text-error" />
+                              {weakness}
+                            </li>
+                          ))}
+                        </ul>
+                      </GlassCard>
+                    )}
+
+                    {/* Recommendations */}
+                    <GlassCard hover={false} className={`${bgCard} border-l-4 border-l-primary`}>
+                      <div className="flex items-center gap-2 mb-3">
+                        <Lightbulb className="w-5 h-5 text-primary" />
+                        <h3 className={`font-bold ${textColor}`}>Recommendations</h3>
+                      </div>
+                      <ul className="space-y-2">
+                        {analysis.recommendations.map((rec, idx) => (
+                          <li key={idx} className={`flex items-start gap-2 text-sm ${textMuted}`}>
+                            <Brain size={16} className="text-primary mt-0.5 flex-shrink-0" />
+                            {rec}
+                          </li>
+                        ))}
+                      </ul>
+                    </GlassCard>
+
+                    {/* University Chances */}
+                    <GlassCard hover={false} className={bgCard}>
+                      <div className="flex items-center gap-2 mb-4">
+                        <BookOpen className="w-5 h-5 text-accent" />
+                        <h3 className={`font-bold ${textColor}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                          University Admission Chances
+                        </h3>
+                      </div>
+                      <div className="space-y-3">
+                        {analysis.universityChances.map((uni, idx) => (
+                          <div key={idx} className={`flex items-center justify-between p-3 rounded-xl ${isDark ? 'bg-white/5' : 'bg-gray-50'}`}>
+                            <span className={`text-sm ${textColor}`}>{uni.tier}</span>
+                            <span className={`text-sm font-medium ${
+                              uni.chance === 'High' ? 'text-success' : uni.chance === 'Medium' ? 'text-warning' : 'text-error'
+                            }`}>
+                              {uni.chance}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </GlassCard>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <Button onClick={() => setView('setup')} fullWidth>
+                Take Another Exam
+              </Button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Scientific Calculator Modal */}
+      <AnimatePresence>
+        {showCalculator && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => setShowCalculator(false)}
+          >
+            <motion.div
+              initial={{ y: 100 }}
+              animate={{ y: 0 }}
+              exit={{ y: 100 }}
+              onClick={e => e.stopPropagation()}
+              className={`w-full max-w-sm ${isDark ? 'bg-gray-900' : 'bg-white'} rounded-2xl p-4 border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-2xl`}
+            >
+              {/* Calculator History */}
+              {calcHistory.length > 0 && (
+                <div className={`mb-2 text-right text-xs ${isDark ? 'text-white/40' : 'text-gray-400'} max-h-12 overflow-y-auto`}>
+                  {calcHistory.map((h, i) => (
+                    <div key={i}>{h}</div>
+                  ))}
+                </div>
+              )}
+              
+              {/* Display */}
+              <div className={`${isDark ? 'bg-white/5' : 'bg-gray-100'} rounded-xl p-4 mb-3 text-right`}>
+                <p className={`text-3xl font-mono truncate ${isDark ? 'text-white' : 'text-gray-900'}`}>{calcValue}</p>
+              </div>
+              
+              {/* Scientific Functions Row */}
+              <div className="grid grid-cols-5 gap-1.5 mb-2">
+                {['√', '^', 'π', '(', ')'].map(btn => (
+                  <button
+                    key={btn}
+                    onClick={() => handleCalcButton(btn)}
+                    className={`p-3 rounded-lg text-sm font-semibold transition-all active:scale-95 ${isDark ? 'bg-white/5 text-white/70 hover:bg-white/10' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    {btn}
+                  </button>
+                ))}
+              </div>
+              
+              {/* Main Calculator Grid */}
+              <div className="grid grid-cols-4 gap-1.5">
+                {['CE', 'C', '⌫', '÷', '7', '8', '9', '×', '4', '5', '6', '-', '1', '2', '3', '+', '±', '0', '.', '='].map(btn => (
+                  <button
+                    key={btn}
+                    onClick={() => handleCalcButton(btn)}
+                    className={`p-3.5 rounded-xl text-lg font-semibold transition-all active:scale-95 ${
+                      btn === '=' ? 'bg-primary text-white' :
+                      btn === 'C' || btn === 'CE' ? 'bg-red-500/80 text-white' :
+                      btn === '⌫' ? 'bg-orange-500/80 text-white' :
+                      ['+', '-', '×', '÷'].includes(btn) ? 'bg-accent/80 text-white' :
+                      isDark ? 'bg-white/10 text-white hover:bg-white/20' : 'bg-gray-100 text-gray-900 hover:bg-gray-200'
+                    }`}
+                  >
+                    {btn}
+                  </button>
+                ))}
+              </div>
+              
+              {/* Extra Functions */}
+              <div className="grid grid-cols-4 gap-1.5 mt-2">
+                {['%', 'sin', 'cos', 'tan'].map(btn => (
+                  <button
+                    key={btn}
+                    onClick={() => {
+                      if (btn === '%') handleCalcButton('%');
+                      else setCalcValue(prev => `Math.${btn}(${prev})`);
+                    }}
+                    className={`p-2.5 rounded-lg text-sm font-semibold transition-all active:scale-95 ${isDark ? 'bg-white/5 text-white/70 hover:bg-white/10' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    {btn}
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
-
-export default ForumPage;
