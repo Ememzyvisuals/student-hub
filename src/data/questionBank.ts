@@ -1075,6 +1075,7 @@ export const getAllQuestionsWithUploaded = async (
 };
 
 // Async function to get questions for practice including uploaded ones
+// This fetches from BOTH Firebase (if configured) AND IndexedDB
 export const getQuestionsWithUploaded = async (
   level: string,
   subject: string,
@@ -1085,28 +1086,63 @@ export const getQuestionsWithUploaded = async (
   // Get static questions
   const staticQuestions = getQuestions(level, subject, topic, difficulty, undefined);
   
-  // Get uploaded questions
+  // Get uploaded questions - try Firebase first, then IndexedDB
   try {
-    const { db } = await import('@/lib/db');
-    let query = db.uploadedQuestions
-      .where('level')
-      .equals(level)
-      .and(q => q.subject === subject && q.isActive);
+    const { isFirebaseConfigured, getAllUploadedQuestions } = await import('@/lib/firebase');
     
-    if (topic) {
-      query = query.and(q => q.topic === topic);
+    if (isFirebaseConfigured()) {
+      // Firebase: Get uploaded questions from Firebase (primary source)
+      const uploadedQuestions = await getAllUploadedQuestions();
+      const filtered = uploadedQuestions.filter((q: any) => {
+        if (q.level !== level) return false;
+        if (q.subject !== subject) return false;
+        if (q.isActive === false) return false;
+        if (topic && q.topic !== topic) return false;
+        if (difficulty && q.difficulty !== difficulty) return false;
+        return true;
+      });
+      
+      const convertedUploaded = filtered.map((q: any) => convertUploadedToQuestion({
+        id: q.id,
+        text: q.text,
+        options: q.options,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation || '',
+        subject: q.subject,
+        topic: q.topic,
+        difficulty: q.difficulty,
+        level: q.level
+      }));
+      
+      const allQuestions = [...staticQuestions, ...convertedUploaded];
+      const shuffled = allQuestions.sort(() => Math.random() - 0.5);
+      console.log(`✅ Practice: Loaded ${convertedUploaded.length} uploaded questions from Firebase`);
+      
+      return count ? shuffled.slice(0, count) : shuffled;
+    } else {
+      // Fallback to IndexedDB when Firebase is not configured
+      const { db } = await import('@/lib/db');
+      let query = db.uploadedQuestions
+        .where('level')
+        .equals(level)
+        .and(q => q.subject === subject && q.isActive);
+      
+      if (topic) {
+        query = query.and(q => q.topic === topic);
+      }
+      if (difficulty) {
+        query = query.and(q => q.difficulty === difficulty);
+      }
+      
+      const uploadedQuestions = await query.toArray();
+      const convertedUploaded = uploadedQuestions.map(convertUploadedToQuestion);
+      
+      const allQuestions = [...staticQuestions, ...convertedUploaded];
+      const shuffled = allQuestions.sort(() => Math.random() - 0.5);
+      console.log(`📦 Practice: Loaded ${convertedUploaded.length} questions from IndexedDB`);
+      
+      return count ? shuffled.slice(0, count) : shuffled;
     }
-    if (difficulty) {
-      query = query.and(q => q.difficulty === difficulty);
-    }
-    
-    const uploadedQuestions = await query.toArray();
-    const convertedUploaded = uploadedQuestions.map(convertUploadedToQuestion);
-    
-    const allQuestions = [...staticQuestions, ...convertedUploaded];
-    const shuffled = allQuestions.sort(() => Math.random() - 0.5);
-    
-    return count ? shuffled.slice(0, count) : shuffled;
   } catch (error) {
     console.error('Error fetching uploaded questions:', error);
     const shuffled = staticQuestions.sort(() => Math.random() - 0.5);
