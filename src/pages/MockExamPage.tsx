@@ -87,6 +87,8 @@ export function MockExamPage({ onOpenMenu }: MockExamPageProps) {
   const [showQuestionNav, setShowQuestionNav] = useState(false);
   const [showDetailedAnalysis, setShowDetailedAnalysis] = useState(false);
   const [showCalculator, setShowCalculator] = useState(false);
+  const [showReviewAnswers, setShowReviewAnswers] = useState(false);
+  const [reviewIndex, setReviewIndex] = useState(0);
   const [calcValue, setCalcValue] = useState('0');
   const [calcHistory, setCalcHistory] = useState<string[]>([]);
 
@@ -841,6 +843,17 @@ export function MockExamPage({ onOpenMenu }: MockExamPageProps) {
                 )}
               </AnimatePresence>
 
+              {/* Review Answers Button */}
+              <button
+                onClick={() => { setShowReviewAnswers(true); setReviewIndex(0); }}
+                className={`w-full p-4 rounded-xl flex items-center justify-center gap-2 ${isDark ? 'bg-accent/20 hover:bg-accent/30' : 'bg-purple-100 hover:bg-purple-200'} transition-colors mb-4`}
+              >
+                <BookOpen size={20} className="text-accent" />
+                <span className={`font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>
+                  Review All Answers
+                </span>
+              </button>
+
               <Button onClick={() => setView('setup')} fullWidth>
                 Take Another Exam
               </Button>
@@ -848,6 +861,177 @@ export function MockExamPage({ onOpenMenu }: MockExamPageProps) {
           )}
         </AnimatePresence>
       </div>
+
+      {/* Review Answers Modal */}
+      <AnimatePresence>
+        {showReviewAnswers && questions.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.9, y: 20 }}
+              className={`w-full max-w-lg max-h-[90vh] overflow-y-auto ${isDark ? 'bg-gray-900' : 'bg-white'} rounded-2xl border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-2xl`}
+            >
+              {/* Header */}
+              <div className={`sticky top-0 z-10 flex items-center justify-between p-4 border-b ${isDark ? 'border-white/10 bg-gray-900' : 'border-gray-200 bg-white'}`}>
+                <div>
+                  <h3 className={`font-bold ${textColor}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                    Review Answers
+                  </h3>
+                  <p className={`text-sm ${textMuted}`}>
+                    Question {reviewIndex + 1} of {questions.length}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowReviewAnswers(false)}
+                  className={`p-2 rounded-xl ${isDark ? 'hover:bg-white/10' : 'hover:bg-gray-100'}`}
+                >
+                  <XCircle size={24} className={textMuted} />
+                </button>
+              </div>
+
+              {/* Question Navigation */}
+              <div className={`p-3 border-b ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                  {questions.map((q, idx) => {
+                    const userAnswer = answers[idx];
+                    const isCorrect = userAnswer === q.correctAnswer;
+                    const wasAnswered = userAnswer !== undefined;
+                    
+                    return (
+                      <button
+                        key={idx}
+                        onClick={() => setReviewIndex(idx)}
+                        className={`w-8 h-8 rounded-lg text-xs font-medium transition-all ${
+                          idx === reviewIndex ? 'ring-2 ring-primary' : ''
+                        } ${
+                          wasAnswered && isCorrect ? 'bg-success/20 text-success' :
+                          wasAnswered && !isCorrect ? 'bg-error/20 text-error' :
+                          isDark ? 'bg-white/10 text-white/60' : 'bg-gray-100 text-gray-600'
+                        }`}
+                      >
+                        {idx + 1}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Current Question */}
+              <div className="p-4 space-y-4">
+                {(() => {
+                  const q = questions[reviewIndex];
+                  const userAnswer = answers[reviewIndex];
+                  const isCorrect = userAnswer === q.correctAnswer;
+                  const wasAnswered = userAnswer !== undefined;
+
+                  return (
+                    <>
+                      {/* Subject Badge */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs px-2 py-1 rounded-full bg-primary/20 text-primary">
+                          {q.subject} - {q.topic}
+                        </span>
+                        <span className={`text-xs px-2 py-1 rounded-full ${
+                          isCorrect ? 'bg-success/20 text-success' : 'bg-error/20 text-error'
+                        }`}>
+                          {isCorrect ? 'Correct' : wasAnswered ? 'Wrong' : 'Not Answered'}
+                        </span>
+                      </div>
+
+                      {/* Question Text */}
+                      <p className={`text-lg ${textColor} leading-relaxed`}>{q.text}</p>
+
+                      {/* Options */}
+                      <div className="space-y-2">
+                        {q.options.map((option, idx) => {
+                          const letter = ['A', 'B', 'C', 'D'][idx];
+                          const isUserAnswer = userAnswer === letter;
+                          const isCorrectAnswer = q.correctAnswer === letter;
+
+                          return (
+                            <div
+                              key={idx}
+                              className={`p-3 rounded-xl flex items-center gap-3 ${
+                                isCorrectAnswer 
+                                  ? 'bg-success/20 border-2 border-success' 
+                                  : isUserAnswer && !isCorrectAnswer
+                                    ? 'bg-error/20 border-2 border-error'
+                                    : isDark ? 'bg-white/5 border border-white/10' : 'bg-gray-50 border border-gray-200'
+                              }`}
+                            >
+                              <span className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-medium ${
+                                isCorrectAnswer 
+                                  ? 'bg-success text-white' 
+                                  : isUserAnswer && !isCorrectAnswer
+                                    ? 'bg-error text-white'
+                                    : isDark ? 'bg-white/10 text-white/60' : 'bg-gray-200 text-gray-600'
+                              }`}>
+                                {letter}
+                              </span>
+                              <span className={`flex-1 ${textColor}`}>{option}</span>
+                              {isCorrectAnswer && (
+                                <CheckCircle size={20} className="text-success" />
+                              )}
+                              {isUserAnswer && !isCorrectAnswer && (
+                                <XCircle size={20} className="text-error" />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* User Answer Summary */}
+                      <div className={`p-3 rounded-xl ${isDark ? 'bg-white/5' : 'bg-gray-50'}`}>
+                        <p className={`text-sm ${textMuted}`}>
+                          <strong>Your Answer:</strong> {userAnswer || 'Not answered'}
+                          {' | '}
+                          <strong>Correct Answer:</strong> {q.correctAnswer}
+                        </p>
+                      </div>
+
+                      {/* Explanation */}
+                      <div className={`p-4 rounded-xl ${isDark ? 'bg-primary/10' : 'bg-blue-50'} border-l-4 border-primary`}>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Lightbulb size={18} className="text-primary" />
+                          <h4 className={`font-semibold ${textColor}`}>Explanation</h4>
+                        </div>
+                        <p className={`text-sm ${textMuted} leading-relaxed`}>
+                          {q.explanation}
+                        </p>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+
+              {/* Navigation Footer */}
+              <div className={`sticky bottom-0 flex gap-3 p-4 border-t ${isDark ? 'border-white/10 bg-gray-900' : 'border-gray-200 bg-white'}`}>
+                <Button
+                  variant="secondary"
+                  onClick={() => setReviewIndex(prev => Math.max(0, prev - 1))}
+                  disabled={reviewIndex === 0}
+                  className="flex-1"
+                >
+                  Previous
+                </Button>
+                <Button
+                  onClick={() => setReviewIndex(prev => Math.min(questions.length - 1, prev + 1))}
+                  disabled={reviewIndex === questions.length - 1}
+                  className="flex-1"
+                >
+                  Next
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Scientific Calculator Modal */}
       <AnimatePresence>
