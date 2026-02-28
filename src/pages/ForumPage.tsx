@@ -277,12 +277,28 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
     setSubmitting(true);
     setError(null);
     const postContent = newPost.trim();
+    const timestamp = Date.now();
     
     console.log('📝 Creating post...');
 
+    // Create optimistic post for immediate UI update
+    const optimisticPost: Post = {
+      id: `temp-${timestamp}`,
+      userId: String(currentUser.id),
+      userName: currentUser.fullName,
+      userLevel: currentUser.academicLevel,
+      content: postContent,
+      timestamp: timestamp,
+      likes: 0
+    };
+
+    // Add to local state immediately for instant feedback
+    setPosts(prev => [optimisticPost, ...prev]);
+    setNewPost('');
+
     try {
       if (isFirebaseConfigured()) {
-        // Create in Firebase - the subscription will update the UI
+        // Create in Firebase
         const postId = await createPost(
           String(currentUser.id),
           currentUser.fullName,
@@ -291,7 +307,13 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         );
         
         console.log('✅ Post created in Firebase:', postId);
-        setNewPost('');
+        
+        // Update the optimistic post with real ID
+        setPosts(prev => prev.map(p => 
+          p.id === optimisticPost.id 
+            ? { ...p, id: postId }
+            : p
+        ));
         
       } else {
         // Create in IndexedDB
@@ -310,23 +332,19 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         
         console.log('✅ Post created in IndexedDB:', localPostId);
         
-        // Add to local state immediately
-        const newPostObj: Post = {
-          id: String(localPostId),
-          odId: localPostId as number,
-          userId: String(userIdNum),
-          userName: currentUser.fullName,
-          userLevel: currentUser.academicLevel,
-          content: postContent,
-          timestamp: Date.now(),
-          likes: 0
-        };
-        setPosts(prev => [newPostObj, ...prev]);
-        setNewPost('');
+        // Update the optimistic post with real ID
+        setPosts(prev => prev.map(p => 
+          p.id === optimisticPost.id 
+            ? { ...p, id: String(localPostId), odId: localPostId as number }
+            : p
+        ));
       }
     } catch (err) {
       console.error('❌ Error creating post:', err);
       setError('Failed to create post. Please try again.');
+      // Remove optimistic post on error
+      setPosts(prev => prev.filter(p => p.id !== optimisticPost.id));
+      setNewPost(postContent); // Restore the input
     } finally {
       setSubmitting(false);
     }
@@ -397,12 +415,30 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
     setSubmitting(true);
     setError(null);
     const commentContent = newComment.trim();
+    const timestamp = Date.now();
 
     console.log('💬 Adding comment...');
 
+    // Create optimistic comment for immediate UI update
+    const optimisticComment: Comment = {
+      id: `temp-${timestamp}`,
+      postId: selectedPost.id,
+      userId: String(currentUser.id),
+      userName: currentUser.fullName,
+      content: commentContent,
+      timestamp: timestamp
+    };
+
+    // Add to local state immediately
+    setComments(prev => ({
+      ...prev,
+      [selectedPost.id]: [...(prev[selectedPost.id] || []), optimisticComment]
+    }));
+    setNewComment('');
+
     try {
       if (isFirebaseConfigured()) {
-        // Create in Firebase - subscription will update UI
+        // Create in Firebase
         const commentId = await addComment(
           selectedPost.id,
           String(currentUser.id),
@@ -411,7 +447,14 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         );
         
         console.log('✅ Comment created in Firebase:', commentId);
-        setNewComment('');
+        
+        // Update the optimistic comment with real ID
+        setComments(prev => ({
+          ...prev,
+          [selectedPost.id]: prev[selectedPost.id]?.map(c =>
+            c.id === optimisticComment.id ? { ...c, id: commentId } : c
+          ) || []
+        }));
         
       } else {
         // Create in IndexedDB
@@ -430,24 +473,23 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         
         console.log('✅ Comment created in IndexedDB:', localCommentId);
         
-        // Add to local state
-        const newCommentObj: Comment = {
-          id: String(localCommentId),
-          postId: selectedPost.id,
-          userId: String(userIdNum),
-          userName: currentUser.fullName,
-          content: commentContent,
-          timestamp: Date.now()
-        };
+        // Update the optimistic comment with real ID
         setComments(prev => ({
           ...prev,
-          [selectedPost.id]: [...(prev[selectedPost.id] || []), newCommentObj]
+          [selectedPost.id]: prev[selectedPost.id]?.map(c =>
+            c.id === optimisticComment.id ? { ...c, id: String(localCommentId) } : c
+          ) || []
         }));
-        setNewComment('');
       }
     } catch (err) {
       console.error('❌ Error adding comment:', err);
       setError('Failed to add comment. Please try again.');
+      // Remove optimistic comment on error
+      setComments(prev => ({
+        ...prev,
+        [selectedPost.id]: prev[selectedPost.id]?.filter(c => c.id !== optimisticComment.id) || []
+      }));
+      setNewComment(commentContent); // Restore input
     } finally {
       setSubmitting(false);
     }
