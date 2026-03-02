@@ -239,6 +239,23 @@ export const onAuthChange = (callback: (user: AuthUser | null) => void) => {
 // Path: /users/{uid}
 // ============================================
 
+// Save user data to database (idempotent - safe to call multiple times)
+export const saveUserToDatabase = async (
+  userId: string, 
+  userData: Omit<FirebaseUserData, 'id'>
+): Promise<FirebaseUserData> => {
+  if (!database) throw new Error('Firebase not configured');
+  
+  await set(ref(database, `users/${userId}`), userData)
+    .catch((error) => {
+      console.error('❌ Firebase Database Error:', error.message);
+      throw error;
+    });
+  
+  console.log('✅ User saved to database:', userId);
+  return { id: userId, ...userData };
+};
+
 export const getUserData = async (userId: string): Promise<FirebaseUserData | null> => {
   if (!database) return null;
   
