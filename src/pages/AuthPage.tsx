@@ -1,320 +1,454 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Mail, Lock, GraduationCap, Eye, EyeOff, BookOpen, Wifi, WifiOff } from 'lucide-react';
-import { Input, Select } from '@/components/ui/Input';
-import { Button } from '@/components/ui/Button';
-import { GlassCard } from '@/components/ui/GlassCard';
-import { db } from '@/lib/db';
-import { useStore } from '@/store/useStore';
 import { 
-  isFirebaseConfigured, 
-  firebaseSignUp, 
-  firebaseSignIn, 
-  getUserData,
-  setUserOnline
-} from '@/lib/firebase';
+  Send, 
+  Mic, 
+  MicOff, 
+  Volume2, 
+  VolumeX, 
+  Settings, 
+  Bot,
+  User,
+  Loader2,
+  Key,
+  X,
+  AlertCircle
+} from 'lucide-react';
+import { GlassCard } from '@/components/ui/GlassCard';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { useStore } from '@/store/useStore';
 
-export function AuthPage() {
-  const [isLogin, setIsLogin] = useState(true);
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const useFirebase = isFirebaseConfigured();
+interface AITutorPageProps {
+  onOpenMenu: () => void;
+}
+
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+}
+
+export function AITutorPage({ onOpenMenu }: AITutorPageProps) {
+  const { openRouterApiKey, setOpenRouterApiKey, currentUser, theme } = useStore();
+  const isDark = theme === 'dark';
   
-  const [formData, setFormData] = useState({
-    fullName: '',
-    email: '',
-    password: '',
-    academicLevel: 'JAMB' as 'JSS' | 'SSS' | 'JAMB' | 'University'
-  });
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: '1',
+      role: 'assistant',
+      content: `Hello ${currentUser?.fullName || 'Student'}! I'm your AI study assistant powered by advanced AI. Ask me anything about your subjects - Mathematics, Physics, Chemistry, Biology, English, and more. I'm here to help you understand concepts and prepare for your exams!`,
+      timestamp: new Date()
+    }
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState(openRouterApiKey);
+  const [isListening, setIsListening] = useState(false);
+  const [speakEnabled, setSpeakEnabled] = useState(false);
+  const [error, setError] = useState('');
+  
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<unknown>(null);
 
-  const setCurrentUser = useStore(state => state.setCurrentUser);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Initialize speech recognition
+  useEffect(() => {
+    const windowWithSpeech = window as Window & { 
+      webkitSpeechRecognition?: new () => { 
+        continuous: boolean; 
+        interimResults: boolean; 
+        start: () => void; 
+        stop: () => void;
+        onresult: ((event: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+      }; 
+      SpeechRecognition?: new () => { 
+        continuous: boolean; 
+        interimResults: boolean; 
+        start: () => void; 
+        stop: () => void;
+        onresult: ((event: { results: { [key: number]: { [key: number]: { transcript: string } } } }) => void) | null;
+        onerror: (() => void) | null;
+        onend: (() => void) | null;
+      };
+    };
+    
+    const SpeechRecognitionClass = windowWithSpeech.webkitSpeechRecognition || windowWithSpeech.SpeechRecognition;
+    if (SpeechRecognitionClass) {
+      const recognition = new SpeechRecognitionClass();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        setInput(transcript);
+        setIsListening(false);
+      };
+      
+      recognition.onerror = () => {
+        setIsListening(false);
+      };
+      
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+      
+      recognitionRef.current = recognition;
+    }
+  }, []);
+
+  const toggleListening = () => {
+    const recognition = recognitionRef.current as { start: () => void; stop: () => void } | null;
+    if (!recognition) {
+      setError('Speech recognition not supported in your browser');
+      return;
+    }
+    
+    if (isListening) {
+      recognition.stop();
+      setIsListening(false);
+    } else {
+      recognition.start();
+      setIsListening(true);
+      setError('');
+    }
+  };
+
+  const speakText = (text: string) => {
+    if (!speakEnabled || !('speechSynthesis' in window)) return;
+    
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.9;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    
     setError('');
+    
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: input.trim(),
+      timestamp: new Date()
+    };
+    
+    setMessages(prev => [...prev, userMessage]);
+    const userInput = input.trim();
+    setInput('');
     setLoading(true);
 
     try {
-      if (useFirebase) {
-        // Firebase Authentication
-        if (isLogin) {
-          // Firebase Login
-          const authUser = await firebaseSignIn(formData.email, formData.password);
-          const userData = await getUserData(authUser.uid);
-          
-          if (userData) {
-            await setUserOnline(authUser.uid);
-            setCurrentUser({
-              id: authUser.uid,
-              email: userData.email,
-              fullName: userData.name,
-              academicLevel: userData.level,
-              streak: userData.streak,
-              questionsAnswered: userData.questionsAnswered,
-              correctAnswers: userData.correctAnswers
-            });
-          } else {
-            setError('User data not found');
-          }
-        } else {
-          // Firebase Signup
-          const userData = await firebaseSignUp(
-            formData.email,
-            formData.password,
-            formData.fullName,
-            formData.academicLevel
-          );
-          
-          await setUserOnline(userData.id);
-          setCurrentUser({
-            id: userData.id,
-            email: userData.email,
-            fullName: userData.name,
-            academicLevel: userData.level,
-            streak: userData.streak,
-            questionsAnswered: userData.questionsAnswered,
-            correctAnswers: userData.correctAnswers
-          });
-        }
-      } else {
-        // IndexedDB Fallback (offline mode)
-        if (isLogin) {
-          // Local Login
-          const user = await db.users.where('email').equals(formData.email.toLowerCase()).first();
-          
-          if (!user || user.password !== formData.password) {
-            setError('Invalid email or password');
-            setLoading(false);
-            return;
-          }
-
-          setCurrentUser({
-            id: String(user.id!),
-            email: user.email,
-            fullName: user.fullName,
-            academicLevel: user.academicLevel,
-            streak: user.streak,
-            questionsAnswered: user.totalQuestionsAnswered,
-            correctAnswers: user.totalCorrect
-          });
-        } else {
-          // Local Signup
-          const existingUser = await db.users.where('email').equals(formData.email.toLowerCase()).first();
-          
-          if (existingUser) {
-            setError('Email already registered');
-            setLoading(false);
-            return;
-          }
-
-          const today = new Date().toISOString().split('T')[0];
-          
-          const id = await db.users.add({
-            email: formData.email.toLowerCase(),
-            password: formData.password,
-            fullName: formData.fullName,
-            academicLevel: formData.academicLevel,
-            createdAt: new Date(),
-            streak: 1,
-            lastActiveDate: today,
-            totalQuestionsAnswered: 0,
-            totalCorrect: 0
-          });
-
-          setCurrentUser({
-            id: String(id),
-            email: formData.email.toLowerCase(),
-            fullName: formData.fullName,
-            academicLevel: formData.academicLevel,
-            streak: 1,
-            questionsAnswered: 0,
-            correctAnswers: 0
-          });
-        }
+      if (!openRouterApiKey) {
+        const errorMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: "Please set your OpenRouter API key in settings to use the AI tutor. Click the settings icon (gear) in the top right to add your key. You can get a free key from openrouter.ai",
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, errorMsg]);
+        setLoading(false);
+        return;
       }
-    } catch (err: any) {
-      console.error('Auth error:', err);
-      // Handle Firebase-specific errors
-      if (err.code === 'auth/email-already-in-use') {
-        setError('Email already registered');
-      } else if (err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found') {
-        setError('Invalid email or password');
-      } else if (err.code === 'auth/weak-password') {
-        setError('Password should be at least 6 characters');
-      } else if (err.code === 'auth/invalid-email') {
-        setError('Invalid email address');
-      } else {
-        setError(err.message || 'An error occurred. Please try again.');
+
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openRouterApiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': window.location.origin,
+          'X-Title': 'STUDENTHUB NG'
+        },
+        body: JSON.stringify({
+          model: 'arcee-ai/trinity-large-preview:free',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a helpful AI tutor for Nigerian students preparing for JAMB, WAEC, NECO and other exams. The student's academic level is ${currentUser?.academicLevel || 'JAMB'}. 
+              
+              Guidelines:
+              - Be encouraging and supportive
+              - Explain concepts clearly with examples
+              - Use Nigerian context when relevant
+              - Break down complex topics into simple steps
+              - Provide practice tips and mnemonics
+              - Keep responses concise but thorough
+              - Format your responses clearly with line breaks
+              - Use simple language that students can understand`
+            },
+            ...messages.slice(-10).map(m => ({
+              role: m.role as 'user' | 'assistant',
+              content: m.content
+            })),
+            { role: 'user' as const, content: userInput }
+          ],
+          max_tokens: 1000,
+          temperature: 0.7
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error?.message || `API error: ${response.status}`);
       }
+
+      const data = await response.json();
+      
+      if (data.choices && data.choices[0] && data.choices[0].message) {
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: data.choices[0].message.content,
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+        speakText(data.choices[0].message.content);
+      } else if (data.error) {
+        throw new Error(data.error.message || 'API returned an error');
+      } else {
+        throw new Error('Invalid response from AI');
+      }
+    } catch (err) {
+      console.error('AI Tutor Error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(errorMessage);
+      
+      const errorMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: `I'm having trouble connecting. Error: ${errorMessage}\n\nPlease check:\n1. Your API key is correct\n2. You have internet connection\n3. The API key has credits available\n\nGet a free key at openrouter.ai`,
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, errorMsg]);
     }
-
+    
     setLoading(false);
   };
 
+  const saveApiKey = () => {
+    setOpenRouterApiKey(tempApiKey);
+    setShowSettings(false);
+    setError('')
+  };
+
   return (
-    <div className="min-h-screen flex flex-col justify-center px-4 py-8 ambient-bg">
-      {/* Logo & Branding */}
-      <motion.div
-        initial={{ opacity: 0, y: -20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="text-center mb-8"
-      >
-        <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-primary to-accent mb-4 shadow-[0_0_40px_rgba(0,122,255,0.4)]">
-          <BookOpen className="w-10 h-10 text-white" />
-        </div>
-        <h1 
-          className="text-3xl font-black text-white mb-1"
-          style={{ fontFamily: 'Clash Display, sans-serif' }}
-        >
-          STUDENTHUB NG
-        </h1>
-        <p className="text-white/60 text-sm">The best free study platform in Nigeria</p>
-        
-        {/* Connection status */}
-        <div className={`inline-flex items-center gap-2 mt-3 px-3 py-1.5 rounded-full text-xs ${
-          useFirebase 
-            ? 'bg-green-500/20 text-green-400' 
-            : 'bg-yellow-500/20 text-yellow-400'
-        }`}>
-          {useFirebase ? <Wifi size={12} /> : <WifiOff size={12} />}
-          <span>{useFirebase ? 'Online Mode' : 'Offline Mode'}</span>
-        </div>
-      </motion.div>
+    <div className={`min-h-screen flex flex-col pb-0 ${isDark ? 'bg-black' : 'bg-gray-50'}`}>
+      {/* Page Header */}
+      <PageHeader 
+        title="AI Tutor" 
+        onOpenMenu={onOpenMenu}
+        rightContent={
+          <>
+            <motion.button
+              whileTap={{ scale: 0.9 }}
+              onClick={() => setSpeakEnabled(!speakEnabled)}
+              className={`p-2.5 rounded-xl transition-colors ${speakEnabled ? 'bg-primary/20 text-primary' : isDark ? 'text-white/60 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-100'}`}
+            >
+              {speakEnabled ? <Volume2 size={18} strokeWidth={1.5} /> : <VolumeX size={18} strokeWidth={1.5} />}
+            </motion.button>
+            <motion.button
+              whileTap={{ scale: 0.9 }}
+              onClick={() => {
+                setTempApiKey(openRouterApiKey);
+                setShowSettings(true);
+              }}
+              className={`p-2.5 rounded-xl transition-colors ${isDark ? 'text-white/60 hover:bg-white/10' : 'text-gray-500 hover:bg-gray-100'}`}
+            >
+              <Settings size={18} strokeWidth={1.5} />
+            </motion.button>
+          </>
+        }
+      />
 
-      {/* Auth Form */}
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1 }}
-      >
-        <GlassCard className="max-w-md mx-auto w-full" hover={false}>
-          {/* Tab Switcher */}
-          <div className="flex gap-2 mb-6 p-1 bg-white/5 rounded-xl">
-            <button
-              onClick={() => setIsLogin(true)}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                isLogin ? 'bg-primary text-white shadow-lg' : 'text-white/60'
-              }`}
-            >
-              Login
-            </button>
-            <button
-              onClick={() => setIsLogin(false)}
-              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-                !isLogin ? 'bg-primary text-white shadow-lg' : 'text-white/60'
-              }`}
-            >
-              Sign Up
-            </button>
+      {/* API Key Warning */}
+      {!openRouterApiKey && (
+        <div className="px-4 py-3">
+          <div className="max-w-2xl mx-auto">
+            <GlassCard className="border-yellow-500/50" hover={false}>
+              <div className="flex items-start gap-3">
+                <AlertCircle size={20} className="text-yellow-500 flex-shrink-0 mt-0.5" strokeWidth={1.5} />
+                <div>
+                  <p className={`text-sm font-medium ${isDark ? 'text-white' : 'text-gray-900'}`}>API Key Required</p>
+                  <p className={`text-xs mt-1 ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                    Click the settings icon to add your OpenRouter API key. Get a free key at openrouter.ai
+                  </p>
+                </div>
+              </div>
+            </GlassCard>
           </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <AnimatePresence mode="wait">
-              {!isLogin && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                >
-                  <Input
-                    label="Full Name"
-                    placeholder="Enter your full name"
-                    icon={<User size={18} />}
-                    value={formData.fullName}
-                    onChange={e => setFormData({ ...formData, fullName: e.target.value })}
-                    required={!isLogin}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <Input
-              label="Email"
-              type="email"
-              placeholder="Enter your email"
-              icon={<Mail size={18} />}
-              value={formData.email}
-              onChange={e => setFormData({ ...formData, email: e.target.value })}
-              required
-            />
-
-            <div className="relative">
-              <Input
-                label="Password"
-                type={showPassword ? 'text' : 'password'}
-                placeholder="Enter your password"
-                icon={<Lock size={18} />}
-                value={formData.password}
-                onChange={e => setFormData({ ...formData, password: e.target.value })}
-                required
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-9 text-white/40 hover:text-white/60"
-              >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
-            </div>
-
-            <AnimatePresence mode="wait">
-              {!isLogin && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                >
-                  <Select
-                    label="Academic Level"
-                    value={formData.academicLevel}
-                    onChange={e => setFormData({ ...formData, academicLevel: e.target.value as 'JSS' | 'SSS' | 'JAMB' | 'University' })}
-                    options={[
-                      { value: 'JSS', label: 'Junior Secondary School (JSS)' },
-                      { value: 'SSS', label: 'Senior Secondary School (SSS)' },
-                      { value: 'JAMB', label: 'JAMB Candidate' },
-                      { value: 'University', label: 'University Student' }
-                    ]}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {error && (
-              <motion.p
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-error text-sm text-center"
-              >
-                {error}
-              </motion.p>
-            )}
-
-            <Button
-              type="submit"
-              fullWidth
-              disabled={loading}
-              icon={<GraduationCap size={20} />}
-            >
-              {loading ? 'Please wait...' : isLogin ? 'Login' : 'Create Account'}
-            </Button>
-          </form>
-        </GlassCard>
-      </motion.div>
-
-      {/* Firebase info */}
-      {!useFirebase && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="text-center mt-6 px-4"
-        >
-          <p className="text-yellow-400/80 text-xs">
-            Running in offline mode. Data will be stored locally on this device.
-          </p>
-        </motion.div>
+        </div>
       )}
+
+      {/* Error Display */}
+      {error && (
+        <div className="px-4 py-2">
+          <div className="max-w-2xl mx-auto">
+            <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3">
+              <p className="text-sm text-red-500">{error}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div className="max-w-2xl mx-auto space-y-4">
+          {messages.map(message => (
+            <motion.div
+              key={message.id}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={`flex gap-3 ${message.role === 'user' ? 'flex-row-reverse' : ''}`}
+            >
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                message.role === 'user' ? 'bg-primary' : 'bg-gradient-to-br from-accent to-purple-600'
+              }`}>
+                {message.role === 'user' ? <User size={18} className="text-white" strokeWidth={1.5} /> : <Bot size={18} className="text-white" strokeWidth={1.5} />}
+              </div>
+              <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                message.role === 'user' 
+                  ? 'bg-primary text-white rounded-br-md' 
+                  : isDark 
+                    ? 'bg-white/10 text-white rounded-bl-md'
+                    : 'bg-white text-gray-900 rounded-bl-md border border-gray-200 shadow-sm'
+              }`}>
+                <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
+              </div>
+            </motion.div>
+          ))}
+          
+          {loading && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex gap-3"
+            >
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-accent to-purple-600 flex items-center justify-center">
+                <Bot size={18} className="text-white" strokeWidth={1.5} />
+              </div>
+              <div className={`${isDark ? 'bg-white/10' : 'bg-white border border-gray-200 shadow-sm'} rounded-2xl rounded-bl-md px-4 py-3`}>
+                <div className="flex items-center gap-2">
+                  <Loader2 className={`w-4 h-4 animate-spin ${isDark ? 'text-white/60' : 'text-gray-400'}`} />
+                  <span className={`text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>Thinking...</span>
+                </div>
+              </div>
+            </motion.div>
+          )}
+          
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      {/* Input - Fixed at bottom */}
+      <div className={`sticky bottom-0 px-4 py-4 ${isDark ? 'bg-black/95' : 'bg-white/95'} backdrop-blur-xl border-t ${isDark ? 'border-white/10' : 'border-gray-200'}`}>
+        <div className="flex gap-3 max-w-2xl mx-auto">
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={toggleListening}
+            className={`p-3.5 rounded-xl flex-shrink-0 transition-all ${
+              isListening 
+                ? 'bg-red-500 text-white shadow-lg shadow-red-500/30' 
+                : isDark 
+                  ? 'bg-white/10 text-white/60 hover:bg-white/20' 
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            {isListening ? <MicOff size={20} strokeWidth={1.5} /> : <Mic size={20} strokeWidth={1.5} />}
+          </motion.button>
+          
+          <input
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && sendMessage()}
+            placeholder="Ask me anything..."
+            className={`flex-1 px-4 py-3.5 rounded-xl border focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all text-base ${
+              isDark 
+                ? 'bg-white/5 border-white/10 text-white placeholder:text-white/30'
+                : 'bg-white border-gray-200 text-gray-900 placeholder:text-gray-400'
+            }`}
+          />
+          
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={sendMessage}
+            disabled={!input.trim() || loading}
+            className="p-3.5 rounded-xl bg-primary text-white disabled:opacity-50 flex-shrink-0 shadow-lg shadow-primary/30 hover:shadow-primary/50 transition-all"
+          >
+            <Send size={20} strokeWidth={1.5} />
+          </motion.button>
+        </div>
+      </div>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => setShowSettings(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+              className={`w-full max-w-md ${isDark ? 'bg-gray-900' : 'bg-white'} rounded-2xl p-6 border ${isDark ? 'border-white/10' : 'border-gray-200'} shadow-2xl`}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-gray-900'}`} style={{ fontFamily: 'Clash Display, sans-serif' }}>
+                  AI Settings
+                </h2>
+                <button onClick={() => setShowSettings(false)} className={`p-2 rounded-lg transition-colors ${isDark ? 'text-white/60 hover:bg-white/10' : 'text-gray-400 hover:bg-gray-100'}`}>
+                  <X size={20} strokeWidth={1.5} />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <Input
+                  label="OpenRouter API Key"
+                  type="password"
+                  placeholder="sk-or-v1-..."
+                  icon={<Key size={18} strokeWidth={1.5} />}
+                  value={tempApiKey}
+                  onChange={e => setTempApiKey(e.target.value)}
+                />
+                
+                <GlassCard hover={false}>
+                  <p className={`text-sm font-medium mb-3 ${isDark ? 'text-white' : 'text-gray-900'}`}>How to get your API key:</p>
+                  <ol className={`list-decimal list-inside space-y-2 text-sm ${isDark ? 'text-white/60' : 'text-gray-500'}`}>
+                    <li>Visit <span className="text-primary font-medium">openrouter.ai</span></li>
+                    <li>Create a free account</li>
+                    <li>Go to Keys section</li>
+                    <li>Create a new API key</li>
+                    <li>Copy and paste it here</li>
+                  </ol>
+                  <p className={`text-xs mt-4 ${isDark ? 'text-white/40' : 'text-gray-400'}`}>
+                    The free tier includes access to Llama models which power this AI tutor.
+                  </p>
+                </GlassCard>
+
+                <Button onClick={saveApiKey} fullWidth>
+                  Save Settings
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
