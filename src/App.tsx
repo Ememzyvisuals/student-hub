@@ -4,6 +4,7 @@ import { useStore } from './store/useStore';
 import { Sidebar } from './components/Sidebar';
 import RatingPopup from './components/RatingPopup';
 import { db } from './lib/db';
+import { onAuthChange, isFirebaseConfigured, getUserData } from './lib/firebase';
 
 // Pages
 import { AuthPage } from './pages/AuthPage';
@@ -30,9 +31,12 @@ function App() {
     maybeLaterClicked,
     maybeLaterTimestamp,
     mockExamsTaken,
+    authReady,
     setHasRated,
     setMaybeLater,
     incrementVisitCount,
+    setAuthReady,
+    setUser,
   } = useStore();
   const [currentPage, setCurrentPage] = useState<Page>('home');
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -65,6 +69,51 @@ function App() {
   useEffect(() => {
     incrementVisitCount();
   }, [incrementVisitCount]);
+
+  // Listen for Firebase auth state changes and set authReady
+  useEffect(() => {
+    if (!isFirebaseConfigured()) {
+      // No Firebase - use localStorage state (already hydrated by Zustand)
+      setAuthReady(true);
+      console.log('✅ Auth ready (no Firebase, using localStorage)');
+      return;
+    }
+
+    // Firebase is configured - listen for auth state
+    console.log('🔄 Listening for Firebase auth state...');
+    const unsubscribe = onAuthChange(async (firebaseUser) => {
+      console.log('🔑 Firebase auth state changed:', firebaseUser?.uid || 'null');
+      
+      if (firebaseUser) {
+        // User is signed in via Firebase - fetch their data
+        try {
+          const userData = await getUserData(firebaseUser.uid);
+          if (userData) {
+            setUser({
+              id: userData.id,
+              email: userData.email,
+              fullName: userData.name,
+              academicLevel: userData.level,
+              questionsAnswered: userData.questionsAnswered,
+              correctAnswers: userData.correctAnswers,
+              streak: userData.streak,
+              badges: userData.badges,
+              mockExamsTaken: userData.mockExamsTaken,
+            });
+          }
+        } catch (err) {
+          console.error('Error fetching user data:', err);
+        }
+      }
+      // Don't logout here - let localStorage state persist if Firebase user is null
+      // This handles the case where user logged in via localStorage before Firebase was configured
+      
+      setAuthReady(true);
+      console.log('✅ Auth ready (Firebase resolved)');
+    });
+
+    return () => unsubscribe();
+  }, [setAuthReady, setUser]);
 
   // Check if should show rating popup
   useEffect(() => {
@@ -137,6 +186,18 @@ function App() {
   const openSidebar = () => {
     setSidebarOpen(true);
   };
+
+  // Show loading while auth state is being resolved
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-gray-400">Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return <AuthPage />;
