@@ -54,7 +54,7 @@ interface Comment {
 }
 
 export function ForumPage({ onOpenMenu }: ForumPageProps) {
-  const { currentUser, theme } = useStore();
+  const { currentUser, theme, authReady } = useStore();
   const [posts, setPosts] = useState<Post[]>([]);
   const [comments, setComments] = useState<Record<string, Comment[]>>({});
   const [newPost, setNewPost] = useState('');
@@ -73,14 +73,20 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
 
   const isDark = theme === 'dark';
 
-  // Load posts
+  // Load posts - ONLY after auth is ready
   useEffect(() => {
+    // Wait for auth to be ready before deciding anything
+    if (!authReady) {
+      console.log('⏳ Waiting for auth to be ready...');
+      return;
+    }
+
     if (!currentUser) {
       setLoading(false);
       return;
     }
 
-    console.log('🔄 Initializing forum...');
+    console.log('🔄 Initializing forum (auth ready)...');
     setLoading(true);
     setError(null);
     setConnectionStatus('connecting');
@@ -164,7 +170,7 @@ export function ForumPage({ onOpenMenu }: ForumPageProps) {
         unsubscribeLikesRef.current = null;
       }
     };
-  }, [currentUser?.id]);
+  }, [authReady, currentUser?.id]);
 
   const loadFromIndexedDB = async () => {
     try {
