@@ -27,6 +27,7 @@ interface AppState {
   // Auth
   currentUser: User | null;
   isAuthenticated: boolean;
+  authReady: boolean;  // NEW: Tracks if auth state has been resolved
   
   // Theme
   theme: 'dark' | 'light';
@@ -62,6 +63,7 @@ interface AppState {
   resetSessionStart: () => void;
   setOpenRouterApiKey: (key: string) => void;
   setUseFirebase: (value: boolean) => void;
+  setAuthReady: (value: boolean) => void;
 }
 
 export const useStore = create<AppState>()(
@@ -70,6 +72,7 @@ export const useStore = create<AppState>()(
       // Initial state
       currentUser: null,
       isAuthenticated: false,
+      authReady: false,  // Will be set to true once auth state is resolved
       theme: 'dark',
       rating: {
         hasRated: false,
@@ -176,6 +179,8 @@ export const useStore = create<AppState>()(
       setOpenRouterApiKey: (key) => set({ openRouterApiKey: key }),
       
       setUseFirebase: (value) => set({ useFirebase: value }),
+      
+      setAuthReady: (value) => set({ authReady: value }),
     }),
     {
       name: 'studenthub-storage',
