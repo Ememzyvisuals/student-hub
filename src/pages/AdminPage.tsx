@@ -34,6 +34,7 @@ import { GlassCard } from '@/components/ui/GlassCard';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { db, User, ForumPost, UploadedQuestion } from '@/lib/db';
+import { useStore } from '@/store/useStore';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, AreaChart, Area, Legend } from 'recharts';
 import {
   isFirebaseConfigured,
@@ -79,6 +80,7 @@ const SUBJECTS_BY_LEVEL = {
 };
 
 export function AdminPage({ onOpenMenu }: AdminPageProps) {
+  const { authReady } = useStore();
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loginStep, setLoginStep] = useState<'credentials' | 'security'>('credentials');
   const [showPassword, setShowPassword] = useState(false);
@@ -292,8 +294,13 @@ export function AdminPage({ onOpenMenu }: AdminPageProps) {
 
   // Real-time listeners for Firebase data
   useEffect(() => {
-    if (!isAuthenticated) return;
+    // Wait for auth to be ready and admin to be authenticated
+    if (!authReady || !isAuthenticated) {
+      console.log('⏳ Admin: Waiting for auth/authentication...');
+      return;
+    }
     
+    console.log('🔥 Admin: Setting up data listeners (authReady + isAuthenticated)');
     const unsubscribers: (() => void)[] = [];
     
     if (isFirebaseConfigured()) {
@@ -381,7 +388,7 @@ export function AdminPage({ onOpenMenu }: AdminPageProps) {
     return () => {
       unsubscribers.forEach(unsub => unsub());
     };
-  }, [isAuthenticated, loadData]);
+  }, [authReady, isAuthenticated, loadData]);
 
   const handleLogin = () => {
     setError('');
