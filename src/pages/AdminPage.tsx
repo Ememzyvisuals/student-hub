@@ -42,6 +42,7 @@ import {
   subscribeToPosts,
   subscribeToFeedback,
   subscribeToUploadedQuestions,
+  subscribeToRatings,
   uploadQuestion as firebaseUploadQuestion
 } from '@/lib/firebase';
 
@@ -375,6 +376,21 @@ export function AdminPage({ onOpenMenu }: AdminPageProps) {
         }));
         setUploadedQuestions(convertedQuestions);
         console.log(`✅ Real-time: ${convertedQuestions.length} uploaded questions loaded`);
+      }));
+      
+      // Ratings real-time
+      unsubscribers.push(subscribeToRatings((firebaseRatings) => {
+        const convertedRatings = firebaseRatings.map(r => ({
+          id: parseInt(r.id || '0') || 0,
+          odId: r.odId,
+          userId: parseInt(r.userId) || 0,
+          rating: r.rating,
+          review: r.review || '',
+          timestamp: new Date(r.createdAt),
+          userName: 'User'
+        }));
+        setFeedback(convertedRatings);
+        console.log(`✅ Real-time: ${convertedRatings.length} ratings loaded`);
       }));
       
     } else {
