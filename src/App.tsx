@@ -4,7 +4,7 @@ import { useStore } from './store/useStore';
 import { Sidebar } from './components/Sidebar';
 import RatingPopup from './components/RatingPopup';
 import { db } from './lib/db';
-import { onAuthChange, isFirebaseConfigured, getUserData } from './lib/firebase';
+import { onAuthChange, isFirebaseConfigured, getUserData, saveRating } from './lib/firebase';
 
 // Pages
 import { AuthPage } from './pages/AuthPage';
@@ -72,47 +72,68 @@ function App() {
 
   // Listen for Firebase auth state changes and set authReady
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      // No Firebase - use localStorage state (already hydrated by Zustand)
-      setAuthReady(true);
-      console.log('✅ Auth ready (no Firebase, using localStorage)');
-      return;
-    }
-
-    // Firebase is configured - listen for auth state
-    console.log('🔄 Listening for Firebase auth state...');
-    const unsubscribe = onAuthChange(async (firebaseUser) => {
-      console.log('🔑 Firebase auth state changed:', firebaseUser?.uid || 'null');
-      
-      if (firebaseUser) {
-        // User is signed in via Firebase - fetch their data
-        try {
-          const userData = await getUserData(firebaseUser.uid);
-          if (userData) {
-            setUser({
-              id: userData.id,
-              email: userData.email,
-              fullName: userData.name,
-              academicLevel: userData.level,
-              questionsAnswered: userData.questionsAnswered,
-              correctAnswers: userData.correctAnswers,
-              streak: userData.streak,
-              badges: userData.badges,
-              mockExamsTaken: userData.mockExamsTaken,
-            });
-          }
-        } catch (err) {
-          console.error('Error fetching user data:', err);
+    let mounted = true;
+    
+    const initAuth = async () => {
+      if (!isFirebaseConfigured()) {
+        // No Firebase - use localStorage state (already hydrated by Zustand)
+        if (mounted) {
+          setAuthReady(true);
+          console.log('✅ Auth ready (no Firebase, using localStorage)');
         }
+        return () => {};
       }
-      // Don't logout here - let localStorage state persist if Firebase user is null
-      // This handles the case where user logged in via localStorage before Firebase was configured
+
+      // Firebase is configured - listen for auth state
+      console.log('🔄 Listening for Firebase auth state...');
       
-      setAuthReady(true);
-      console.log('✅ Auth ready (Firebase resolved)');
+      const unsubscribe = onAuthChange(async (firebaseUser) => {
+        if (!mounted) return;
+        
+        console.log('🔑 Firebase auth state changed:', firebaseUser?.uid || 'null');
+        
+        if (firebaseUser) {
+          // User is signed in via Firebase - fetch their data
+          try {
+            const userData = await getUserData(firebaseUser.uid);
+            if (userData && mounted) {
+              setUser({
+                id: userData.id,
+                email: userData.email,
+                fullName: userData.name,
+                academicLevel: userData.level,
+                questionsAnswered: userData.questionsAnswered,
+                correctAnswers: userData.correctAnswers,
+                streak: userData.streak,
+                badges: userData.badges,
+                mockExamsTaken: userData.mockExamsTaken,
+              });
+            }
+          } catch (err) {
+            console.error('Error fetching user data:', err);
+          }
+        }
+        // Don't logout here - let localStorage state persist if Firebase user is null
+        // This handles the case where user logged in via localStorage before Firebase was configured
+        
+        if (mounted) {
+          setAuthReady(true);
+          console.log('✅ Auth ready (Firebase resolved)');
+        }
+      });
+
+      return unsubscribe;
+    };
+    
+    let unsubscribe: (() => void) | undefined;
+    initAuth().then(unsub => {
+      unsubscribe = unsub;
     });
 
-    return () => unsubscribe();
+    return () => {
+      mounted = false;
+      if (unsubscribe) unsubscribe();
+    };
   }, [setAuthReady, setUser]);
 
   // Check if should show rating popup
@@ -161,6 +182,13 @@ function App() {
     setShowRatingPopup(false);
     
     try {
+      // Save to Firebase first if configured
+      if (isFirebaseConfigured()) {
+        await saveRating(ratingValue, review);
+        console.log('✅ Rating saved to Firebase');
+      }
+      
+      // Also save to IndexedDB as backup
       await db.feedback.add({
         id: Date.now(),
         rating: ratingValue,
