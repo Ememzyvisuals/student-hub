@@ -921,7 +921,120 @@ export const deleteFlashcard = async (flashcardId: string) => {
 };
 
 // ============================================
-// FEEDBACK
+// RATINGS (Persistent - survives refresh)
+// Path: /ratings/{ratingId}
+// ============================================
+
+export interface FirebaseRating {
+  id?: string;
+  odId?: number;
+  userId: string;
+  rating: number;
+  review: string;
+  createdAt: number;
+}
+
+export const saveRating = async (rating: number, review: string): Promise<string | null> => {
+  if (!database) {
+    console.warn('⚠️ Firebase not configured - cannot save rating');
+    return null;
+  }
+
+  const userId = getCurrentUserId();
+  if (!userId) {
+    console.error('❌ User must be authenticated to save rating');
+    return null;
+  }
+
+  try {
+    const ratingsRef = ref(database, 'ratings');
+    const newRatingRef = push(ratingsRef);
+    const ratingData = {
+      userId,
+      rating,
+      review,
+      createdAt: Date.now()
+    };
+
+    await set(newRatingRef, ratingData);
+    console.log('✅ Rating saved to Firebase:', newRatingRef.key);
+    return newRatingRef.key;
+  } catch (error) {
+    console.error('❌ Error saving rating:', error);
+    return null;
+  }
+};
+
+export const subscribeToRatings = (callback: (ratings: FirebaseRating[]) => void): (() => void) => {
+  if (!database) {
+    console.warn('⚠️ Firebase not configured - cannot subscribe to ratings');
+    callback([]);
+    return () => {};
+  }
+
+  const db = database;
+  const ratingsRef = ref(db, 'ratings');
+  
+  onValue(ratingsRef, (snapshot) => {
+    const ratings: FirebaseRating[] = [];
+    if (snapshot.exists()) {
+      snapshot.forEach((childSnapshot) => {
+        const data = childSnapshot.val();
+        ratings.push({
+          id: childSnapshot.key || '',
+          odId: parseInt(childSnapshot.key || '0') || 0,
+          userId: data.userId,
+          rating: data.rating,
+          review: data.review || '',
+          createdAt: data.createdAt
+        });
+      });
+    }
+    console.log('📥 Received ratings from Firebase:', ratings.length);
+    callback(ratings.sort((a, b) => b.createdAt - a.createdAt));
+  }, (error) => {
+    console.error('❌ Error subscribing to ratings:', error);
+    callback([]);
+  });
+
+  return () => {
+    off(ratingsRef);
+    console.log('🔌 Unsubscribed from ratings');
+  };
+};
+
+export const getUserRating = async (userId: string): Promise<FirebaseRating | null> => {
+  if (!database) return null;
+
+  try {
+    const ratingsRef = ref(database, 'ratings');
+    const snapshot = await get(ratingsRef);
+    
+    if (snapshot.exists()) {
+      let userRating: FirebaseRating | null = null;
+      snapshot.forEach((child) => {
+        const data = child.val();
+        if (data.userId === userId) {
+          userRating = {
+            id: child.key || '',
+            userId: data.userId,
+            rating: data.rating,
+            review: data.review || '',
+            createdAt: data.createdAt
+          };
+        }
+      });
+      return userRating;
+    }
+    return null;
+  } catch (error) {
+    console.error('❌ Error getting user rating:', error);
+    return null;
+  }
+};
+
+// ============================================
+// FEEDBACK (Legacy - kept for backward compatibility)
 // Path: /feedback/{feedbackId}
 // ============================================
 
